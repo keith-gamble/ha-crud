@@ -9,21 +9,49 @@ Endpoints are registered based on the resources enabled in the config.
 from __future__ import annotations
 
 import logging
+from typing import Any
 
 from homeassistant.config_entries import ConfigEntry
 from homeassistant.core import HomeAssistant
 
 from .const import (
+    CONF_DASHBOARDS_READ,
+    CONF_DASHBOARDS_WRITE,
+    CONF_DISCOVERY_AREAS,
+    CONF_DISCOVERY_DEVICES,
+    CONF_DISCOVERY_ENTITIES,
+    CONF_DISCOVERY_INTEGRATIONS,
+    CONF_DISCOVERY_SERVICES,
     CONF_ENABLED_RESOURCES,
     DATA_DASHBOARDS_COLLECTION,
-    DEFAULT_RESOURCES,
+    DEFAULT_OPTIONS,
     DOMAIN,
+    RESOURCE_AREAS,
     RESOURCE_DASHBOARDS,
+    RESOURCE_DEVICES,
+    RESOURCE_ENTITIES,
+    RESOURCE_INTEGRATIONS,
+    RESOURCE_SERVICES,
 )
 from .views import (
+    AreaDetailView,
+    AreaListView,
     DashboardConfigView,
     DashboardDetailView,
     DashboardListView,
+    DeviceDetailView,
+    DeviceListView,
+    DomainEntitiesView,
+    DomainListView,
+    DomainServiceListView,
+    EntityDetailView,
+    EntityListView,
+    FloorDetailView,
+    FloorListView,
+    IntegrationDetailView,
+    IntegrationListView,
+    ServiceDetailView,
+    ServiceListView,
 )
 
 _LOGGER = logging.getLogger(__name__)
@@ -32,22 +60,88 @@ _LOGGER = logging.getLogger(__name__)
 _REGISTERED_VIEWS: set[str] = set()
 
 
+async def async_migrate_entry(hass: HomeAssistant, config_entry: ConfigEntry) -> bool:
+    """Migrate old config entry to new version.
+
+    Args:
+        hass: Home Assistant instance
+        config_entry: Config entry to migrate
+
+    Returns:
+        True if migration was successful
+    """
+    _LOGGER.info("Migrating ha_crud config entry from version %s", config_entry.version)
+
+    if config_entry.version == 1:
+        # Migrate from version 1 (legacy format) to version 2 (granular options)
+        old_options = dict(config_entry.options)
+        new_options = DEFAULT_OPTIONS.copy()
+
+        # Check for legacy format
+        if CONF_ENABLED_RESOURCES in old_options:
+            enabled = old_options.get(CONF_ENABLED_RESOURCES, [])
+            if RESOURCE_DASHBOARDS in enabled:
+                new_options[CONF_DASHBOARDS_READ] = True
+                new_options[CONF_DASHBOARDS_WRITE] = True
+
+        hass.config_entries.async_update_entry(
+            config_entry,
+            options=new_options,
+            version=2,
+        )
+        _LOGGER.info("Migration to version 2 successful")
+
+    return True
+
+
+def _get_options(entry: ConfigEntry) -> dict[str, Any]:
+    """Get options with migration from legacy format.
+
+    Args:
+        entry: Config entry
+
+    Returns:
+        Options dict in the new granular format
+    """
+    options = dict(entry.options)
+
+    # If already in new format, return as-is
+    if CONF_DISCOVERY_ENTITIES in options:
+        return options
+
+    # Check for legacy format
+    if CONF_ENABLED_RESOURCES in options:
+        enabled = options.get(CONF_ENABLED_RESOURCES, [])
+        new_options = DEFAULT_OPTIONS.copy()
+
+        # Map legacy resources to new format
+        if RESOURCE_DASHBOARDS in enabled:
+            new_options[CONF_DASHBOARDS_READ] = True
+            new_options[CONF_DASHBOARDS_WRITE] = True
+
+        _LOGGER.info("Migrated legacy options to new format")
+        return new_options
+
+    # No options set, return defaults
+    return DEFAULT_OPTIONS.copy()
+
+
 async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
     """Set up HA CRUD REST API from a config entry."""
     hass.data.setdefault(DOMAIN, {})
     hass.data[DOMAIN][entry.entry_id] = entry.data
 
-    # Get enabled resources from options (or defaults)
-    enabled_resources = entry.options.get(CONF_ENABLED_RESOURCES, DEFAULT_RESOURCES)
+    # Get options (with migration support)
+    options = _get_options(entry)
 
-    _LOGGER.info("HA CRUD REST API setting up with resources: %s", enabled_resources)
+    _LOGGER.info("HA CRUD REST API setting up with options: %s", options)
 
     # Initialize DashboardsCollection if dashboards are enabled
-    if RESOURCE_DASHBOARDS in enabled_resources:
+    if options.get(CONF_DASHBOARDS_READ) or options.get(CONF_DASHBOARDS_WRITE):
         await _setup_dashboards_collection(hass)
 
     # Register views for enabled resources
-    _register_views(hass, enabled_resources)
+    _register_views(hass, options)
 
     # Listen for options updates
     entry.async_on_unload(entry.add_update_listener(_async_update_options))
@@ -86,11 +180,11 @@ async def async_unload_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
 
 async def _async_update_options(hass: HomeAssistant, entry: ConfigEntry) -> None:
     """Handle options update."""
-    enabled_resources = entry.options.get(CONF_ENABLED_RESOURCES, DEFAULT_RESOURCES)
-    _LOGGER.info("HA CRUD REST API options updated. Enabled resources: %s", enabled_resources)
+    options = _get_options(entry)
+    _LOGGER.info("HA CRUD REST API options updated: %s", options)
 
     # Register any newly enabled views
-    _register_views(hass, enabled_resources)
+    _register_views(hass, options)
 
     # Note: We can't unregister views, so disabled resources remain until restart
     _LOGGER.info(
@@ -98,29 +192,63 @@ async def _async_update_options(hass: HomeAssistant, entry: ConfigEntry) -> None
     )
 
 
-def _register_views(hass: HomeAssistant, enabled_resources: list[str]) -> None:
-    """Register HTTP views for enabled resources."""
+def _register_views(hass: HomeAssistant, options: dict[str, Any]) -> None:
+    """Register HTTP views for enabled resources.
+
+    Args:
+        hass: Home Assistant instance
+        options: Configuration options dict
+    """
     global _REGISTERED_VIEWS
 
-    # Dashboard views
-    if RESOURCE_DASHBOARDS in enabled_resources and RESOURCE_DASHBOARDS not in _REGISTERED_VIEWS:
+    # Dashboard views (if read or write enabled)
+    dashboards_enabled = options.get(CONF_DASHBOARDS_READ) or options.get(CONF_DASHBOARDS_WRITE)
+    if dashboards_enabled and RESOURCE_DASHBOARDS not in _REGISTERED_VIEWS:
         hass.http.register_view(DashboardListView())
         hass.http.register_view(DashboardDetailView())
         hass.http.register_view(DashboardConfigView())
         _REGISTERED_VIEWS.add(RESOURCE_DASHBOARDS)
-        _LOGGER.info("Registered dashboard API endpoints at /api/config/dashboards")
+        _LOGGER.info("Registered dashboard API endpoints at /api/ha_crud/dashboards")
+
+    # Entity discovery views
+    if options.get(CONF_DISCOVERY_ENTITIES) and RESOURCE_ENTITIES not in _REGISTERED_VIEWS:
+        hass.http.register_view(EntityListView())
+        hass.http.register_view(EntityDetailView())
+        hass.http.register_view(DomainListView())
+        hass.http.register_view(DomainEntitiesView())
+        _REGISTERED_VIEWS.add(RESOURCE_ENTITIES)
+        _LOGGER.info("Registered entity discovery API endpoints at /api/ha_crud/entities")
+
+    # Device discovery views
+    if options.get(CONF_DISCOVERY_DEVICES) and RESOURCE_DEVICES not in _REGISTERED_VIEWS:
+        hass.http.register_view(DeviceListView())
+        hass.http.register_view(DeviceDetailView())
+        _REGISTERED_VIEWS.add(RESOURCE_DEVICES)
+        _LOGGER.info("Registered device discovery API endpoints at /api/ha_crud/devices")
+
+    # Area/Floor discovery views
+    if options.get(CONF_DISCOVERY_AREAS) and RESOURCE_AREAS not in _REGISTERED_VIEWS:
+        hass.http.register_view(AreaListView())
+        hass.http.register_view(AreaDetailView())
+        hass.http.register_view(FloorListView())
+        hass.http.register_view(FloorDetailView())
+        _REGISTERED_VIEWS.add(RESOURCE_AREAS)
+        _LOGGER.info("Registered area/floor discovery API endpoints at /api/ha_crud/areas and /api/ha_crud/floors")
+
+    # Integration discovery views
+    if options.get(CONF_DISCOVERY_INTEGRATIONS) and RESOURCE_INTEGRATIONS not in _REGISTERED_VIEWS:
+        hass.http.register_view(IntegrationListView())
+        hass.http.register_view(IntegrationDetailView())
+        _REGISTERED_VIEWS.add(RESOURCE_INTEGRATIONS)
+        _LOGGER.info("Registered integration discovery API endpoints at /api/ha_crud/integrations")
+
+    # Service discovery views
+    if options.get(CONF_DISCOVERY_SERVICES) and RESOURCE_SERVICES not in _REGISTERED_VIEWS:
+        hass.http.register_view(ServiceListView())
+        hass.http.register_view(DomainServiceListView())
+        hass.http.register_view(ServiceDetailView())
+        _REGISTERED_VIEWS.add(RESOURCE_SERVICES)
+        _LOGGER.info("Registered service discovery API endpoints at /api/ha_crud/services")
 
     # Future resource views will be added here:
-    # if RESOURCE_AUTOMATIONS in enabled_resources and RESOURCE_AUTOMATIONS not in _REGISTERED_VIEWS:
-    #     hass.http.register_view(AutomationListView())
-    #     ...
-    #     _REGISTERED_VIEWS.add(RESOURCE_AUTOMATIONS)
-
-    # if RESOURCE_SCENES in enabled_resources and RESOURCE_SCENES not in _REGISTERED_VIEWS:
-    #     ...
-
-    # if RESOURCE_SCRIPTS in enabled_resources and RESOURCE_SCRIPTS not in _REGISTERED_VIEWS:
-    #     ...
-
-    # if RESOURCE_HELPERS in enabled_resources and RESOURCE_HELPERS not in _REGISTERED_VIEWS:
-    #     ...
+    # Automations, Scripts, Scenes, etc.

@@ -1,7 +1,7 @@
 {
   "name": "ha-crud-api",
-  "description": "Home Assistant CRUD REST API for managing Lovelace dashboards",
-  "version": "1.0.0",
+  "description": "Home Assistant CRUD REST API for managing Lovelace dashboards and discovering entities/devices",
+  "version": "1.1.0",
   "baseUrl": "http://homeassistant.local:8123",
   "authentication": {
     "type": "bearer",
@@ -24,7 +24,7 @@
       "name": "ha_get_dashboard",
       "description": "Get metadata for a specific dashboard. Use 'lovelace' as the dashboard_id for the default dashboard.",
       "method": "GET",
-      "path": "/api/config/dashboards/{dashboard_id}",
+      "path": "/api/ha_crud/dashboards/{dashboard_id}",
       "inputSchema": {
         "type": "object",
         "properties": {
@@ -40,7 +40,7 @@
       "name": "ha_get_dashboard_config",
       "description": "Get the full configuration (views, cards, etc.) of a dashboard. This returns the actual dashboard content that defines what users see.",
       "method": "GET",
-      "path": "/api/config/dashboards/{dashboard_id}/config",
+      "path": "/api/ha_crud/dashboards/{dashboard_id}/config",
       "inputSchema": {
         "type": "object",
         "properties": {
@@ -91,7 +91,7 @@
       "name": "ha_update_dashboard",
       "description": "Fully update a dashboard's metadata (title, icon, etc.). Requires admin privileges. Cannot modify YAML-based dashboards.",
       "method": "PUT",
-      "path": "/api/config/dashboards/{dashboard_id}",
+      "path": "/api/ha_crud/dashboards/{dashboard_id}",
       "inputSchema": {
         "type": "object",
         "properties": {
@@ -123,7 +123,7 @@
       "name": "ha_patch_dashboard",
       "description": "Partially update a dashboard's metadata. Only provided fields are updated. Requires admin privileges.",
       "method": "PATCH",
-      "path": "/api/config/dashboards/{dashboard_id}",
+      "path": "/api/ha_crud/dashboards/{dashboard_id}",
       "inputSchema": {
         "type": "object",
         "properties": {
@@ -155,7 +155,7 @@
       "name": "ha_update_dashboard_config",
       "description": "Replace the full configuration (views, cards) of a dashboard. This is how you upload dashboard JSON content. Requires admin privileges.",
       "method": "PUT",
-      "path": "/api/config/dashboards/{dashboard_id}/config",
+      "path": "/api/ha_crud/dashboards/{dashboard_id}/config",
       "inputSchema": {
         "type": "object",
         "properties": {
@@ -189,7 +189,7 @@
       "name": "ha_delete_dashboard",
       "description": "Delete a dashboard. Cannot delete the default 'lovelace' dashboard or YAML-based dashboards. Requires admin privileges.",
       "method": "DELETE",
-      "path": "/api/config/dashboards/{dashboard_id}",
+      "path": "/api/ha_crud/dashboards/{dashboard_id}",
       "inputSchema": {
         "type": "object",
         "properties": {
@@ -199,6 +199,295 @@
           }
         },
         "required": ["dashboard_id"]
+      }
+    },
+    {
+      "name": "ha_list_entities",
+      "description": "List all entities in Home Assistant with optional filtering. Returns entity_id, state, domain, friendly_name, device_id, area_id, platform, and more. Use filters to narrow results.",
+      "method": "GET",
+      "path": "/api/ha_crud/entities",
+      "inputSchema": {
+        "type": "object",
+        "properties": {
+          "domain": {
+            "type": "string",
+            "description": "Filter by domain (e.g., 'light', 'sensor', 'switch', 'climate')"
+          },
+          "area": {
+            "type": "string",
+            "description": "Filter by area_id"
+          },
+          "floor": {
+            "type": "string",
+            "description": "Filter by floor_id"
+          },
+          "device": {
+            "type": "string",
+            "description": "Filter by device_id"
+          },
+          "platform": {
+            "type": "string",
+            "description": "Filter by integration platform (e.g., 'hue', 'zwave_js')"
+          },
+          "device_class": {
+            "type": "string",
+            "description": "Filter by device_class (e.g., 'temperature', 'motion')"
+          },
+          "state": {
+            "type": "string",
+            "description": "Filter by current state (e.g., 'on', 'off', 'unavailable')"
+          },
+          "include_disabled": {
+            "type": "boolean",
+            "description": "Include disabled entities (default: false)",
+            "default": false
+          },
+          "include_hidden": {
+            "type": "boolean",
+            "description": "Include hidden entities (default: false)",
+            "default": false
+          }
+        },
+        "required": []
+      }
+    },
+    {
+      "name": "ha_get_entity",
+      "description": "Get full details for a specific entity including state, attributes, device info, area, and floor. Useful for understanding entity capabilities.",
+      "method": "GET",
+      "path": "/api/ha_crud/entities/{entity_id}",
+      "inputSchema": {
+        "type": "object",
+        "properties": {
+          "entity_id": {
+            "type": "string",
+            "description": "The entity ID (e.g., 'light.living_room', 'sensor.temperature')"
+          }
+        },
+        "required": ["entity_id"]
+      }
+    },
+    {
+      "name": "ha_list_domains",
+      "description": "List all entity domains in Home Assistant with entity counts and descriptions. Useful for understanding what types of entities are available.",
+      "method": "GET",
+      "path": "/api/ha_crud/entities/domains",
+      "inputSchema": {
+        "type": "object",
+        "properties": {},
+        "required": []
+      }
+    },
+    {
+      "name": "ha_list_domain_entities",
+      "description": "List all entities for a specific domain with full attributes. More detailed than ha_list_entities with domain filter.",
+      "method": "GET",
+      "path": "/api/ha_crud/entities/domains/{domain}",
+      "inputSchema": {
+        "type": "object",
+        "properties": {
+          "domain": {
+            "type": "string",
+            "description": "The entity domain (e.g., 'light', 'sensor', 'climate', 'media_player')"
+          },
+          "include_disabled": {
+            "type": "boolean",
+            "description": "Include disabled entities (default: false)",
+            "default": false
+          },
+          "include_hidden": {
+            "type": "boolean",
+            "description": "Include hidden entities (default: false)",
+            "default": false
+          }
+        },
+        "required": ["domain"]
+      }
+    },
+    {
+      "name": "ha_list_devices",
+      "description": "List all devices in Home Assistant with optional filtering. Returns device info including name, manufacturer, model, area, and entity count.",
+      "method": "GET",
+      "path": "/api/ha_crud/devices",
+      "inputSchema": {
+        "type": "object",
+        "properties": {
+          "area": {
+            "type": "string",
+            "description": "Filter by area_id"
+          },
+          "floor": {
+            "type": "string",
+            "description": "Filter by floor_id"
+          },
+          "integration": {
+            "type": "string",
+            "description": "Filter by integration domain (e.g., 'hue', 'zwave_js', 'ring')"
+          },
+          "manufacturer": {
+            "type": "string",
+            "description": "Filter by manufacturer name"
+          },
+          "model": {
+            "type": "string",
+            "description": "Filter by model name"
+          },
+          "include_disabled": {
+            "type": "boolean",
+            "description": "Include disabled devices (default: false)",
+            "default": false
+          }
+        },
+        "required": []
+      }
+    },
+    {
+      "name": "ha_get_device",
+      "description": "Get full details for a specific device including all its entities. Useful for understanding what entities belong to a device.",
+      "method": "GET",
+      "path": "/api/ha_crud/devices/{device_id}",
+      "inputSchema": {
+        "type": "object",
+        "properties": {
+          "device_id": {
+            "type": "string",
+            "description": "The device ID (UUID format)"
+          }
+        },
+        "required": ["device_id"]
+      }
+    },
+    {
+      "name": "ha_list_areas",
+      "description": "List all areas in Home Assistant. Returns area info including name, floor, icon, and device/entity counts. Useful for organizing dashboards by location.",
+      "method": "GET",
+      "path": "/api/ha_crud/areas",
+      "inputSchema": {
+        "type": "object",
+        "properties": {
+          "floor": {
+            "type": "string",
+            "description": "Filter by floor_id"
+          }
+        },
+        "required": []
+      }
+    },
+    {
+      "name": "ha_get_area",
+      "description": "Get full details for a specific area including all devices and entities in that area. Useful for building area-specific dashboards.",
+      "method": "GET",
+      "path": "/api/ha_crud/areas/{area_id}",
+      "inputSchema": {
+        "type": "object",
+        "properties": {
+          "area_id": {
+            "type": "string",
+            "description": "The area ID (e.g., 'living_room', 'bedroom')"
+          }
+        },
+        "required": ["area_id"]
+      }
+    },
+    {
+      "name": "ha_list_floors",
+      "description": "List all floors in Home Assistant. Returns floor info including name, level, icon, and area count. Useful for multi-story home organization.",
+      "method": "GET",
+      "path": "/api/ha_crud/floors",
+      "inputSchema": {
+        "type": "object",
+        "properties": {},
+        "required": []
+      }
+    },
+    {
+      "name": "ha_get_floor",
+      "description": "Get full details for a specific floor including all areas on that floor. Useful for building floor-specific views.",
+      "method": "GET",
+      "path": "/api/ha_crud/floors/{floor_id}",
+      "inputSchema": {
+        "type": "object",
+        "properties": {
+          "floor_id": {
+            "type": "string",
+            "description": "The floor ID (e.g., 'ground_floor', 'upstairs')"
+          }
+        },
+        "required": ["floor_id"]
+      }
+    },
+    {
+      "name": "ha_list_integrations",
+      "description": "List all active integrations in Home Assistant. Returns integration info including name, config entry count, device/entity counts, and state.",
+      "method": "GET",
+      "path": "/api/ha_crud/integrations",
+      "inputSchema": {
+        "type": "object",
+        "properties": {},
+        "required": []
+      }
+    },
+    {
+      "name": "ha_get_integration",
+      "description": "Get full details for a specific integration including config entries, devices, and entity breakdown by domain.",
+      "method": "GET",
+      "path": "/api/ha_crud/integrations/{domain}",
+      "inputSchema": {
+        "type": "object",
+        "properties": {
+          "domain": {
+            "type": "string",
+            "description": "The integration domain (e.g., 'hue', 'zwave_js', 'ring', 'homekit')"
+          }
+        },
+        "required": ["domain"]
+      }
+    },
+    {
+      "name": "ha_list_services",
+      "description": "List all available services grouped by domain. Returns a dictionary with domains as keys and arrays of service names as values.",
+      "method": "GET",
+      "path": "/api/ha_crud/services",
+      "inputSchema": {
+        "type": "object",
+        "properties": {},
+        "required": []
+      }
+    },
+    {
+      "name": "ha_list_domain_services",
+      "description": "List all services for a specific domain with names, descriptions, and field names.",
+      "method": "GET",
+      "path": "/api/ha_crud/services/{domain}",
+      "inputSchema": {
+        "type": "object",
+        "properties": {
+          "domain": {
+            "type": "string",
+            "description": "The service domain (e.g., 'light', 'climate', 'media_player', 'automation')"
+          }
+        },
+        "required": ["domain"]
+      }
+    },
+    {
+      "name": "ha_get_service",
+      "description": "Get full details for a specific service including all fields, their descriptions, types, selectors, and examples. Essential for building automations.",
+      "method": "GET",
+      "path": "/api/ha_crud/services/{domain}/{service}",
+      "inputSchema": {
+        "type": "object",
+        "properties": {
+          "domain": {
+            "type": "string",
+            "description": "The service domain (e.g., 'light')"
+          },
+          "service": {
+            "type": "string",
+            "description": "The service name (e.g., 'turn_on', 'turn_off', 'toggle')"
+          }
+        },
+        "required": ["domain", "service"]
       }
     }
   ]
