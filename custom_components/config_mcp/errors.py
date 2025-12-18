@@ -1,4 +1,4 @@
-"""Custom exceptions for ha_crud component."""
+"""Custom exceptions for Configuration MCP Server component."""
 
 from homeassistant.exceptions import HomeAssistantError
 

@@ -20,3 +20,8 @@ Thumbs.db
 
 # Claude
 .claude/
+
+# Local settings
+.env
+*.local.md
+

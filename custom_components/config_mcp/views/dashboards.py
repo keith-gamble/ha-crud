@@ -13,12 +13,19 @@ from homeassistant.components.http import HomeAssistantView
 from homeassistant.core import HomeAssistant
 
 from ..const import (
-    API_BASE_PATH,
+    API_BASE_PATH_DASHBOARDS,
+    CONF_DASHBOARDS_CREATE,
+    CONF_DASHBOARDS_DELETE,
+    CONF_DASHBOARDS_READ,
+    CONF_DASHBOARDS_UPDATE,
     CONF_ICON,
     CONF_REQUIRE_ADMIN,
     CONF_SHOW_IN_SIDEBAR,
     CONF_TITLE,
     CONF_URL_PATH,
+    DATA_DASHBOARDS_COLLECTION,
+    DEFAULT_OPTIONS,
+    DOMAIN,
     ERR_DASHBOARD_EXISTS,
     ERR_DASHBOARD_NOT_FOUND,
     ERR_INVALID_CONFIG,
@@ -40,21 +47,169 @@ if TYPE_CHECKING:
 _LOGGER = logging.getLogger(__name__)
 
 
-def get_lovelace_data(hass: HomeAssistant) -> dict[str, Any]:
+def get_config_options(hass: HomeAssistant) -> dict[str, Any]:
+    """Get the current configuration options for config_mcp.
+
+    Args:
+        hass: Home Assistant instance
+
+    Returns:
+        Configuration options dict, merged with defaults
+    """
+    options = DEFAULT_OPTIONS.copy()
+
+    # Get options from config entry
+    if DOMAIN in hass.data:
+        for entry_id, entry_data in hass.data[DOMAIN].items():
+            # entry_data is the config entry data, we need the options
+            # Find the config entry by entry_id
+            for entry in hass.config_entries.async_entries(DOMAIN):
+                if entry.entry_id == entry_id:
+                    options.update(entry.options)
+                    break
+
+    return options
+
+
+def check_permission(hass: HomeAssistant, permission: str) -> bool:
+    """Check if a specific permission is enabled.
+
+    Args:
+        hass: Home Assistant instance
+        permission: The permission key to check
+
+    Returns:
+        True if permitted, False otherwise
+    """
+    options = get_config_options(hass)
+    return options.get(permission, False)
+
+
+def get_lovelace_data(hass: HomeAssistant):
     """Get lovelace data from hass.data."""
-    return hass.data.get(LOVELACE_DATA, {})
+    return hass.data.get(LOVELACE_DATA)
 
 
 def get_dashboards_collection(hass: HomeAssistant):
     """Get the dashboards collection for storage dashboards."""
-    return hass.data.get("lovelace_dashboards")
+    from ..const import DOMAIN
+
+    # First try our component's stored collection
+    collection = hass.data.get(DATA_DASHBOARDS_COLLECTION)
+    if collection is not None:
+        return collection
+
+    # Log available keys for debugging
+    lovelace_keys = [k for k in hass.data.keys() if "lovelace" in str(k).lower()]
+    _LOGGER.debug("DashboardsCollection not found. Lovelace-related keys: %s", lovelace_keys)
+
+    return None
+
+
+async def _register_dashboard_with_lovelace(
+    hass: HomeAssistant, url_path: str, data: dict[str, Any]
+) -> None:
+    """Register a newly created dashboard with lovelace and frontend.
+
+    This makes the dashboard immediately visible without requiring a restart.
+    """
+    try:
+        from homeassistant.components.lovelace.dashboard import LovelaceStorage
+        from homeassistant.components.frontend import async_register_built_in_panel
+
+        lovelace_data = get_lovelace_data(hass)
+        if lovelace_data is None:
+            _LOGGER.warning("Cannot register dashboard - lovelace data not available")
+            return
+
+        # Create LovelaceStorage instance for the new dashboard
+        config = {
+            "id": url_path,
+            "url_path": url_path,
+            "title": data.get(CONF_TITLE),
+            "icon": data.get(CONF_ICON, "mdi:view-dashboard"),
+            "show_in_sidebar": data.get(CONF_SHOW_IN_SIDEBAR, True),
+            "require_admin": data.get(CONF_REQUIRE_ADMIN, False),
+        }
+
+        # Add to lovelace dashboards
+        lovelace_data.dashboards[url_path] = LovelaceStorage(hass, config)
+
+        # Register frontend panel using proper import
+        async_register_built_in_panel(
+            hass,
+            "lovelace",
+            config_panel_domain="lovelace",
+            sidebar_title=data.get(CONF_TITLE),
+            sidebar_icon=data.get(CONF_ICON, "mdi:view-dashboard"),
+            frontend_url_path=url_path,
+            config={"mode": "storage"},
+            require_admin=data.get(CONF_REQUIRE_ADMIN, False),
+        )
+
+        _LOGGER.debug("Registered dashboard '%s' with lovelace and frontend", url_path)
+
+    except Exception as err:
+        _LOGGER.warning(
+            "Could not register dashboard with frontend (may require restart): %s", err
+        )
+
+
+async def _unregister_dashboard_from_lovelace(
+    hass: HomeAssistant, url_path: str
+) -> None:
+    """Unregister a dashboard from lovelace and frontend."""
+    try:
+        from homeassistant.components.frontend import async_remove_panel
+
+        lovelace_data = get_lovelace_data(hass)
+        if lovelace_data and url_path in lovelace_data.dashboards:
+            del lovelace_data.dashboards[url_path]
+
+        # Remove frontend panel
+        async_remove_panel(hass, url_path)
+
+        _LOGGER.debug("Unregistered dashboard '%s' from lovelace and frontend", url_path)
+
+    except Exception as err:
+        _LOGGER.warning(
+            "Could not unregister dashboard from frontend (may require restart): %s", err
+        )
+
+
+async def _ensure_collection_loaded(hass: HomeAssistant):
+    """Ensure the dashboards collection is loaded with latest data."""
+    collection = hass.data.get(DATA_DASHBOARDS_COLLECTION)
+    if collection is not None:
+        await collection.async_load()
+    return collection
+
+
+def _url_path_to_item_id(url_path: str) -> str:
+    """Convert url_path to collection item ID.
+
+    Home Assistant sanitizes the ID by replacing hyphens with underscores.
+    """
+    return url_path.replace("-", "_")
+
+
+def _find_item_id_by_url_path(collection, url_path: str) -> str | None:
+    """Find the collection item ID for a given url_path.
+
+    Returns the item ID if found, None otherwise.
+    """
+    for item_id, item in collection.data.items():
+        if item.get("url_path") == url_path:
+            return item_id
+    # Fallback: try the sanitized version
+    return _url_path_to_item_id(url_path)
 
 
 class DashboardListView(HomeAssistantView):
     """View to list all dashboards and create new ones."""
 
-    url = API_BASE_PATH
-    name = "api:config:dashboards"
+    url = API_BASE_PATH_DASHBOARDS
+    name = "api:config_mcp:dashboards"
     requires_auth = True
 
     async def get(self, request: web.Request) -> web.Response:
@@ -62,17 +217,25 @@ class DashboardListView(HomeAssistantView):
 
         Returns:
             200: JSON array of dashboard metadata
+            403: Permission denied
         """
         hass: HomeAssistant = request.app["hass"]
+
+        # Check read permission
+        if not check_permission(hass, CONF_DASHBOARDS_READ):
+            return self.json_message(
+                "Dashboard read permission is disabled",
+                HTTPStatus.FORBIDDEN,
+            )
+
         lovelace_data = get_lovelace_data(hass)
 
         if not lovelace_data:
             return self.json([])
 
         dashboards = []
-        dashboard_configs = lovelace_data.get("dashboards", {})
 
-        for url_path, config in dashboard_configs.items():
+        for url_path, config in lovelace_data.dashboards.items():
             try:
                 info = await config.async_get_info()
                 dashboard_data = {
@@ -111,9 +274,17 @@ class DashboardListView(HomeAssistantView):
             201: Dashboard created successfully
             400: Invalid request data
             401: Not authorized (non-admin)
+            403: Permission denied
             409: Dashboard already exists
         """
         hass: HomeAssistant = request.app["hass"]
+
+        # Check create permission
+        if not check_permission(hass, CONF_DASHBOARDS_CREATE):
+            return self.json_message(
+                "Dashboard create permission is disabled",
+                HTTPStatus.FORBIDDEN,
+            )
 
         # Check admin permission
         user = request.get("hass_user")
@@ -144,7 +315,7 @@ class DashboardListView(HomeAssistantView):
 
         url_path = validated_data[CONF_URL_PATH]
         lovelace_data = get_lovelace_data(hass)
-        dashboard_configs = lovelace_data.get("dashboards", {})
+        dashboard_configs = lovelace_data.dashboards
 
         # Check if dashboard already exists
         if url_path in dashboard_configs:
@@ -173,6 +344,9 @@ class DashboardListView(HomeAssistantView):
 
             await collection.async_create_item(validated_data)
 
+            # Also register the dashboard with lovelace and frontend for immediate visibility
+            await _register_dashboard_with_lovelace(hass, url_path, validated_data)
+
             return self.json(
                 {
                     "id": url_path,
@@ -196,8 +370,8 @@ class DashboardListView(HomeAssistantView):
 class DashboardDetailView(HomeAssistantView):
     """View for single dashboard operations."""
 
-    url = API_BASE_PATH + "/{dashboard_id}"
-    name = "api:config:dashboard"
+    url = API_BASE_PATH_DASHBOARDS + "/{dashboard_id}"
+    name = "api:config_mcp:dashboard"
     requires_auth = True
 
     async def get(
@@ -210,9 +384,18 @@ class DashboardDetailView(HomeAssistantView):
 
         Returns:
             200: Dashboard metadata
+            403: Permission denied
             404: Dashboard not found
         """
         hass: HomeAssistant = request.app["hass"]
+
+        # Check read permission
+        if not check_permission(hass, CONF_DASHBOARDS_READ):
+            return self.json_message(
+                "Dashboard read permission is disabled",
+                HTTPStatus.FORBIDDEN,
+            )
+
         lovelace_data = get_lovelace_data(hass)
 
         if not lovelace_data:
@@ -224,7 +407,7 @@ class DashboardDetailView(HomeAssistantView):
 
         # Handle default dashboard
         url_path = None if dashboard_id == "lovelace" else dashboard_id
-        dashboard_configs = lovelace_data.get("dashboards", {})
+        dashboard_configs = lovelace_data.dashboards
 
         config = dashboard_configs.get(url_path)
         if config is None:
@@ -275,10 +458,18 @@ class DashboardDetailView(HomeAssistantView):
             200: Dashboard updated
             400: Invalid request data
             401: Not authorized (non-admin)
+            403: Permission denied
             404: Dashboard not found
             409: Cannot modify YAML dashboard
         """
         hass: HomeAssistant = request.app["hass"]
+
+        # Check update permission
+        if not check_permission(hass, CONF_DASHBOARDS_UPDATE):
+            return self.json_message(
+                "Dashboard update permission is disabled",
+                HTTPStatus.FORBIDDEN,
+            )
 
         # Check admin permission
         user = request.get("hass_user")
@@ -290,7 +481,7 @@ class DashboardDetailView(HomeAssistantView):
 
         lovelace_data = get_lovelace_data(hass)
         url_path = None if dashboard_id == "lovelace" else dashboard_id
-        dashboard_configs = lovelace_data.get("dashboards", {})
+        dashboard_configs = lovelace_data.dashboards
 
         config = dashboard_configs.get(url_path)
         if config is None:
@@ -328,14 +519,17 @@ class DashboardDetailView(HomeAssistantView):
             )
 
         try:
-            collection = get_dashboards_collection(hass)
+            # Reload collection to ensure we have latest data
+            collection = await _ensure_collection_loaded(hass)
             if collection is None:
                 return self.json_message(
                     "Dashboard collection not available",
                     HTTPStatus.INTERNAL_SERVER_ERROR,
                 )
 
-            await collection.async_update_item(url_path, validated_data)
+            # Find the correct item ID (may differ from url_path due to sanitization)
+            item_id = _find_item_id_by_url_path(collection, url_path)
+            await collection.async_update_item(item_id, validated_data)
 
             return self.json({
                 "id": dashboard_id,
@@ -370,10 +564,18 @@ class DashboardDetailView(HomeAssistantView):
             200: Dashboard updated
             400: Invalid request data
             401: Not authorized (non-admin)
+            403: Permission denied
             404: Dashboard not found
             409: Cannot modify YAML dashboard
         """
         hass: HomeAssistant = request.app["hass"]
+
+        # Check update permission
+        if not check_permission(hass, CONF_DASHBOARDS_UPDATE):
+            return self.json_message(
+                "Dashboard update permission is disabled",
+                HTTPStatus.FORBIDDEN,
+            )
 
         # Check admin permission
         user = request.get("hass_user")
@@ -385,7 +587,7 @@ class DashboardDetailView(HomeAssistantView):
 
         lovelace_data = get_lovelace_data(hass)
         url_path = None if dashboard_id == "lovelace" else dashboard_id
-        dashboard_configs = lovelace_data.get("dashboards", {})
+        dashboard_configs = lovelace_data.dashboards
 
         config = dashboard_configs.get(url_path)
         if config is None:
@@ -430,26 +632,42 @@ class DashboardDetailView(HomeAssistantView):
             )
 
         try:
-            collection = get_dashboards_collection(hass)
+            # Reload collection to ensure we have latest data
+            collection = await _ensure_collection_loaded(hass)
             if collection is None:
                 return self.json_message(
                     "Dashboard collection not available",
                     HTTPStatus.INTERNAL_SERVER_ERROR,
                 )
 
-            await collection.async_update_item(url_path, validated_data)
+            # Find the correct item ID (may differ from url_path due to sanitization)
+            item_id = _find_item_id_by_url_path(collection, url_path)
 
-            # Fetch updated info
-            updated_info = await config.async_get_info()
+            # Get existing item data and merge with updates
+            existing_item = collection.data.get(item_id, {})
 
+            # Only include fields that are allowed in updates (not id, url_path, mode)
+            allowed_fields = ["title", "icon", "show_in_sidebar", "require_admin"]
+            merged_data = {}
+            for field in allowed_fields:
+                if field in validated_data:
+                    merged_data[field] = validated_data[field]
+                elif field in existing_item:
+                    merged_data[field] = existing_item[field]
+
+            _LOGGER.debug("PATCH: item_id=%s, merged_data=%s", item_id, merged_data)
+
+            await collection.async_update_item(item_id, merged_data)
+
+            # Return the merged data since lovelace object may not reflect changes immediately
             return self.json({
                 "id": dashboard_id,
                 "url_path": url_path,
                 "mode": MODE_STORAGE,
-                "title": updated_info.get("title"),
-                "icon": updated_info.get("icon"),
-                "show_in_sidebar": updated_info.get("show_in_sidebar", True),
-                "require_admin": updated_info.get("require_admin", False),
+                "title": merged_data.get("title"),
+                "icon": merged_data.get("icon"),
+                "show_in_sidebar": merged_data.get("show_in_sidebar", True),
+                "require_admin": merged_data.get("require_admin", False),
             })
         except Exception as err:
             _LOGGER.exception("Error updating dashboard: %s", err)
@@ -469,10 +687,18 @@ class DashboardDetailView(HomeAssistantView):
         Returns:
             204: Dashboard deleted (no content)
             401: Not authorized (non-admin)
+            403: Permission denied
             404: Dashboard not found
             409: Cannot delete YAML or default dashboard
         """
         hass: HomeAssistant = request.app["hass"]
+
+        # Check delete permission
+        if not check_permission(hass, CONF_DASHBOARDS_DELETE):
+            return self.json_message(
+                "Dashboard delete permission is disabled",
+                HTTPStatus.FORBIDDEN,
+            )
 
         # Check admin permission
         user = request.get("hass_user")
@@ -492,7 +718,7 @@ class DashboardDetailView(HomeAssistantView):
 
         lovelace_data = get_lovelace_data(hass)
         url_path = dashboard_id
-        dashboard_configs = lovelace_data.get("dashboards", {})
+        dashboard_configs = lovelace_data.dashboards
 
         config = dashboard_configs.get(url_path)
         if config is None:
@@ -512,14 +738,20 @@ class DashboardDetailView(HomeAssistantView):
             )
 
         try:
-            collection = get_dashboards_collection(hass)
+            # Reload collection to ensure we have latest data
+            collection = await _ensure_collection_loaded(hass)
             if collection is None:
                 return self.json_message(
                     "Dashboard collection not available",
                     HTTPStatus.INTERNAL_SERVER_ERROR,
                 )
 
-            await collection.async_delete_item(url_path)
+            # Find the correct item ID (may differ from url_path due to sanitization)
+            item_id = _find_item_id_by_url_path(collection, url_path)
+            await collection.async_delete_item(item_id)
+
+            # Also unregister from lovelace and frontend for immediate effect
+            await _unregister_dashboard_from_lovelace(hass, url_path)
 
             return web.Response(status=HTTPStatus.NO_CONTENT)
         except Exception as err:
@@ -533,8 +765,8 @@ class DashboardDetailView(HomeAssistantView):
 class DashboardConfigView(HomeAssistantView):
     """View for dashboard configuration (views/cards) operations."""
 
-    url = API_BASE_PATH + "/{dashboard_id}/config"
-    name = "api:config:dashboard:config"
+    url = API_BASE_PATH_DASHBOARDS + "/{dashboard_id}/config"
+    name = "api:config_mcp:dashboard:config"
     requires_auth = True
 
     async def get(
@@ -547,9 +779,18 @@ class DashboardConfigView(HomeAssistantView):
 
         Returns:
             200: Dashboard configuration (views, cards, etc.)
+            403: Permission denied
             404: Dashboard or config not found
         """
         hass: HomeAssistant = request.app["hass"]
+
+        # Check read permission
+        if not check_permission(hass, CONF_DASHBOARDS_READ):
+            return self.json_message(
+                "Dashboard read permission is disabled",
+                HTTPStatus.FORBIDDEN,
+            )
+
         lovelace_data = get_lovelace_data(hass)
 
         if not lovelace_data:
@@ -560,7 +801,7 @@ class DashboardConfigView(HomeAssistantView):
             )
 
         url_path = None if dashboard_id == "lovelace" else dashboard_id
-        dashboard_configs = lovelace_data.get("dashboards", {})
+        dashboard_configs = lovelace_data.dashboards
 
         config = dashboard_configs.get(url_path)
         if config is None:
@@ -600,10 +841,18 @@ class DashboardConfigView(HomeAssistantView):
             200: Configuration saved
             400: Invalid configuration
             401: Not authorized (non-admin)
+            403: Permission denied
             404: Dashboard not found
             409: YAML dashboard is read-only
         """
         hass: HomeAssistant = request.app["hass"]
+
+        # Check update permission
+        if not check_permission(hass, CONF_DASHBOARDS_UPDATE):
+            return self.json_message(
+                "Dashboard update permission is disabled",
+                HTTPStatus.FORBIDDEN,
+            )
 
         # Check admin permission
         user = request.get("hass_user")
@@ -615,7 +864,7 @@ class DashboardConfigView(HomeAssistantView):
 
         lovelace_data = get_lovelace_data(hass)
         url_path = None if dashboard_id == "lovelace" else dashboard_id
-        dashboard_configs = lovelace_data.get("dashboards", {})
+        dashboard_configs = lovelace_data.dashboards
 
         dashboard = dashboard_configs.get(url_path)
         if dashboard is None:

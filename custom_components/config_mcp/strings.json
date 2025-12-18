@@ -1,0 +1,131 @@
+{
+  "config": {
+    "step": {
+      "user": {
+        "title": "Configuration MCP Server",
+        "description": "This integration exposes REST API endpoints and an MCP server for managing Home Assistant resources.\n\nAfter setup, use the Configure button to customize which APIs are enabled.\n\nDocumentation: [{docs_url}]({docs_url})"
+      }
+    },
+    "abort": {
+      "already_configured": "Configuration MCP Server is already configured."
+    }
+  },
+  "issues": {
+    "oauth_restart_required": {
+      "title": "Restart Required for OAuth",
+      "description": "You have enabled OAuth authentication for the MCP server. A restart is required for this change to take effect.\n\nAfter restarting, browser-based MCP clients will be able to authenticate via OAuth."
+    }
+  },
+  "options": {
+    "step": {
+      "init": {
+        "title": "Configure MCP Server",
+        "description": "Select a category to configure. Changes are saved automatically when you submit.",
+        "menu_options": {
+          "mcp_server": "MCP Server",
+          "discovery": "System Discovery",
+          "dashboards": "Lovelace Dashboards",
+          "automations": "Automations",
+          "scripts": "Scripts",
+          "scenes": "Scenes"
+        }
+      },
+      "discovery": {
+        "title": "System Discovery",
+        "description": "Configure read-only discovery endpoints for querying entities, devices, areas, and other Home Assistant resources.",
+        "data": {
+          "discovery_entities": "Entity Discovery",
+          "discovery_devices": "Device Discovery",
+          "discovery_areas": "Area & Floor Discovery",
+          "discovery_integrations": "Integration Discovery",
+          "discovery_services": "Service Discovery"
+        },
+        "data_description": {
+          "discovery_entities": "List and get entity states, attributes, and registry info",
+          "discovery_devices": "List and get device info, manufacturer, model",
+          "discovery_areas": "List and get areas and floors with device/entity counts",
+          "discovery_integrations": "List active integrations with config entries and devices",
+          "discovery_services": "List available services with parameters and selectors"
+        }
+      },
+      "dashboards": {
+        "title": "Lovelace Dashboards",
+        "description": "Configure dashboard management with granular permissions.\n\n**Endpoint:** `/api/config_mcp/dashboards`",
+        "data": {
+          "dashboards_read": "Read",
+          "dashboards_create": "Create",
+          "dashboards_update": "Update",
+          "dashboards_delete": "Delete"
+        },
+        "data_description": {
+          "dashboards_read": "List dashboards, get metadata and configuration",
+          "dashboards_create": "Create new dashboards",
+          "dashboards_update": "Update dashboard metadata and configuration",
+          "dashboards_delete": "Delete dashboards (cannot delete default or YAML dashboards)"
+        }
+      },
+      "mcp_server": {
+        "title": "MCP Server",
+        "description": "Configure the Model Context Protocol (MCP) server for AI assistants like Claude Code.\n\n**Endpoint:** `https://YOUR_HA_URL/api/config_mcp/mcp`\n\n**Token Authentication (recommended):**\n```\nclaude mcp add --transport http config-mcp \\\n  https://YOUR_HA_URL/api/config_mcp/mcp \\\n  --header \"Authorization: Bearer YOUR_LONG_LIVED_TOKEN\"\n```\n\n**OAuth Authentication:**\nIf OAuth is enabled below, you can authenticate interactively:\n```\nclaude mcp add --transport http config-mcp \\\n  https://YOUR_HA_URL/api/config_mcp/mcp\n```\nThen run `/mcp` in Claude Code and select \"Authenticate\" to login via browser.\n\n**OAuth Status:** {oidc_status}",
+        "data": {
+          "mcp_server": "Enable MCP Server",
+          "mcp_oauth_enabled": "Enable OAuth Authentication",
+          "logs_read": "Enable Log Reading"
+        },
+        "data_description": {
+          "mcp_server": "Exposes 36+ tools for dashboards, automations, scripts, scenes, entities, devices, areas, integrations, services, and logs via MCP protocol",
+          "mcp_oauth_enabled": "Allow browser-based OAuth login via the /mcp command in Claude Code. Requires hass-oidc-auth integration.",
+          "logs_read": "Allow MCP clients to read Home Assistant logs for debugging and verification"
+        }
+      },
+      "automations": {
+        "title": "Automations",
+        "description": "Configure automation management.\n\n**Endpoint:** `/api/config_mcp/automations`",
+        "data": {
+          "automations_read": "Read",
+          "automations_create": "Create",
+          "automations_update": "Update & Trigger",
+          "automations_delete": "Delete"
+        },
+        "data_description": {
+          "automations_read": "List automations, get automation config and state",
+          "automations_create": "Create new automations",
+          "automations_update": "Update automation config, enable/disable, and trigger automations",
+          "automations_delete": "Delete automations"
+        }
+      },
+      "scripts": {
+        "title": "Scripts",
+        "description": "Configure script management.\n\n**Endpoint:** `/api/config_mcp/scripts`",
+        "data": {
+          "scripts_read": "Read",
+          "scripts_create": "Create",
+          "scripts_update": "Update & Run",
+          "scripts_delete": "Delete"
+        },
+        "data_description": {
+          "scripts_read": "List scripts, get script config and state",
+          "scripts_create": "Create new scripts",
+          "scripts_update": "Update script config, run and stop scripts",
+          "scripts_delete": "Delete scripts"
+        }
+      },
+      "scenes": {
+        "title": "Scenes",
+        "description": "Configure scene management.\n\n**Endpoint:** `/api/config_mcp/scenes`",
+        "data": {
+          "scenes_read": "Read",
+          "scenes_create": "Create",
+          "scenes_update": "Update",
+          "scenes_delete": "Delete"
+        },
+        "data_description": {
+          "scenes_read": "List scenes, get scene config and entities",
+          "scenes_create": "Create new scenes",
+          "scenes_update": "Update scene config and entities",
+          "scenes_delete": "Delete scenes"
+        }
+      }
+    }
+  }
+}

@@ -1,305 +1,163 @@
-# HA CRUD REST API
+# Configuration MCP Server
 
-A Home Assistant custom component that exposes REST endpoints for managing Lovelace dashboards programmatically. Designed to integrate with Claude or other AI tools via MCP.
+A Home Assistant custom component that exposes an MCP (Model Context Protocol) server and REST API endpoints for managing Home Assistant configuration programmatically. Designed for integration with AI assistants like Claude Code.
 
 ## Features
 
-- Full CRUD operations for Lovelace dashboards
-- Separate endpoints for dashboard metadata vs. configuration (views/cards)
-- Bearer token authentication (uses HA long-lived access tokens)
-- Admin permission enforcement for write operations
-- Support for storage-mode dashboards (YAML dashboards are read-only)
+- **MCP Server** - Native MCP protocol support for AI assistants
+- **Lovelace Dashboards** - Full CRUD operations for dashboards and views
+- **Automations** - Create, update, delete, enable/disable, and trigger automations
+- **Scripts** - Create, update, delete, run, and stop scripts
+- **Scenes** - Create, update, delete, and activate scenes
+- **System Discovery** - Query entities, devices, areas, floors, integrations, and services
+- **Log Reading** - Access Home Assistant logs for debugging
+- **OAuth Support** - Browser-based authentication for MCP clients (requires hass-oidc-auth)
+- **Granular Permissions** - Enable/disable each capability independently
 
 ## Installation
 
 ### HACS (Recommended)
 
 1. Add this repository as a custom repository in HACS
-2. Search for "HA CRUD REST API" and install
+2. Search for "Configuration MCP Server" and install
 3. Restart Home Assistant
+4. Go to Settings > Integrations > Add Integration > "Configuration MCP Server"
+5. Configure which capabilities to enable
 
 ### Manual Installation
 
-1. Copy the `custom_components/ha_crud` folder to your Home Assistant config directory:
-
-```bash
-cp -r custom_components/ha_crud /path/to/homeassistant/config/custom_components/
-```
-
+1. Copy the `custom_components/config_mcp` folder to your Home Assistant config directory
 2. Restart Home Assistant
+3. Go to Settings > Integrations > Add Integration > "Configuration MCP Server"
 
-3. Verify installation by checking the logs for:
-   ```
-   HA CRUD REST API registered. Dashboard endpoints available at /api/config/dashboards
-   ```
+## MCP Server Setup
 
-## Configuration
-
-No configuration is required. The component auto-loads on startup and registers the API endpoints.
-
-## Authentication
-
-All endpoints require a valid Home Assistant long-lived access token.
-
-### Creating a Long-Lived Access Token
-
-1. Go to your Home Assistant profile (click your username in the sidebar)
-2. Scroll to "Long-Lived Access Tokens"
-3. Click "Create Token"
-4. Give it a name (e.g., "Claude Dashboard API")
-5. Copy the token (you won't see it again)
-
-### Using the Token
-
-Include the token in the `Authorization` header:
+### Claude Code - Token Authentication (Recommended)
 
 ```bash
-curl -H "Authorization: Bearer YOUR_TOKEN_HERE" \
-  http://homeassistant.local:8123/api/config/dashboards
+claude mcp add --transport http config-mcp \
+  https://your-ha-instance:8123/api/config_mcp/mcp \
+  --header "Authorization: Bearer YOUR_LONG_LIVED_TOKEN"
 ```
 
-## API Reference
+### Claude Code - OAuth Authentication
 
-### Base URL
-
-```
-http://homeassistant.local:8123/api/config/dashboards
-```
-
-### Endpoints
-
-| Method | Endpoint | Description | Admin Required |
-|--------|----------|-------------|----------------|
-| GET | `/` | List all dashboards | No |
-| POST | `/` | Create new dashboard | Yes |
-| GET | `/{id}` | Get dashboard metadata | No |
-| PUT | `/{id}` | Full update metadata | Yes |
-| PATCH | `/{id}` | Partial update metadata | Yes |
-| DELETE | `/{id}` | Delete dashboard | Yes |
-| GET | `/{id}/config` | Get dashboard config (views/cards) | No |
-| PUT | `/{id}/config` | Replace dashboard config | Yes |
-
-### List All Dashboards
+If OAuth is enabled (requires hass-oidc-auth):
 
 ```bash
-curl -H "Authorization: Bearer TOKEN" \
-  http://homeassistant.local:8123/api/config/dashboards
+claude mcp add --transport http config-mcp \
+  https://your-ha-instance:8123/api/config_mcp/mcp
 ```
 
-**Response:**
-```json
-[
-  {
-    "id": "lovelace",
-    "url_path": null,
-    "mode": "storage",
-    "title": "Home",
-    "icon": "mdi:home",
-    "show_in_sidebar": true,
-    "require_admin": false
-  },
-  {
-    "id": "my-dashboard",
-    "url_path": "my-dashboard",
-    "mode": "storage",
-    "title": "My Dashboard",
-    "icon": "mdi:view-dashboard",
-    "show_in_sidebar": true,
-    "require_admin": false
-  }
-]
-```
+Then run `/mcp` in Claude Code and select "Authenticate" to login via browser.
 
-### Get Dashboard Metadata
+## Available MCP Tools
 
-```bash
-curl -H "Authorization: Bearer TOKEN" \
-  http://homeassistant.local:8123/api/config/dashboards/my-dashboard
-```
-
-Use `lovelace` as the ID for the default dashboard.
-
-### Get Dashboard Configuration (Views/Cards)
-
-```bash
-curl -H "Authorization: Bearer TOKEN" \
-  http://homeassistant.local:8123/api/config/dashboards/my-dashboard/config
-```
-
-**Response:**
-```json
-{
-  "views": [
-    {
-      "title": "Living Room",
-      "path": "living-room",
-      "cards": [
-        {
-          "type": "light",
-          "entity": "light.living_room"
-        }
-      ]
-    }
-  ]
-}
-```
-
-### Create a New Dashboard
-
-```bash
-curl -X POST \
-  -H "Authorization: Bearer TOKEN" \
-  -H "Content-Type: application/json" \
-  -d '{
-    "url_path": "my-new-dashboard",
-    "title": "My New Dashboard",
-    "icon": "mdi:view-dashboard",
-    "show_in_sidebar": true,
-    "require_admin": false
-  }' \
-  http://homeassistant.local:8123/api/config/dashboards
-```
-
-**Note:** The `url_path` must contain a hyphen (Home Assistant requirement).
-
-**Response (201 Created):**
-```json
-{
-  "id": "my-new-dashboard",
-  "url_path": "my-new-dashboard",
-  "title": "My New Dashboard",
-  "icon": "mdi:view-dashboard",
-  "show_in_sidebar": true,
-  "require_admin": false,
-  "mode": "storage"
-}
-```
-
-### Upload Dashboard Configuration
-
-```bash
-curl -X PUT \
-  -H "Authorization: Bearer TOKEN" \
-  -H "Content-Type: application/json" \
-  -d '{
-    "views": [
-      {
-        "title": "Main",
-        "path": "main",
-        "cards": [
-          {
-            "type": "markdown",
-            "content": "Welcome to my dashboard!"
-          }
-        ]
-      }
-    ]
-  }' \
-  http://homeassistant.local:8123/api/config/dashboards/my-new-dashboard/config
-```
-
-### Update Dashboard Metadata (Full)
-
-```bash
-curl -X PUT \
-  -H "Authorization: Bearer TOKEN" \
-  -H "Content-Type: application/json" \
-  -d '{
-    "title": "Updated Title",
-    "icon": "mdi:home-assistant",
-    "show_in_sidebar": true,
-    "require_admin": false
-  }' \
-  http://homeassistant.local:8123/api/config/dashboards/my-dashboard
-```
-
-### Update Dashboard Metadata (Partial)
-
-```bash
-curl -X PATCH \
-  -H "Authorization: Bearer TOKEN" \
-  -H "Content-Type: application/json" \
-  -d '{"title": "New Title"}' \
-  http://homeassistant.local:8123/api/config/dashboards/my-dashboard
-```
-
-### Delete a Dashboard
-
-```bash
-curl -X DELETE \
-  -H "Authorization: Bearer TOKEN" \
-  http://homeassistant.local:8123/api/config/dashboards/my-dashboard
-```
-
-**Response:** `204 No Content`
-
-**Note:** Cannot delete the default `lovelace` dashboard or YAML-based dashboards.
-
-## Error Responses
-
-All errors return JSON with a message and error code:
-
-```json
-{
-  "message": "Dashboard 'xyz' not found",
-  "code": "dashboard_not_found"
-}
-```
-
-| HTTP Status | Error Code | Description |
-|-------------|------------|-------------|
-| 400 | `invalid_config` | Request body validation failed |
-| 401 | - | Missing or invalid authentication |
-| 404 | `dashboard_not_found` | Dashboard does not exist |
-| 409 | `dashboard_already_exists` | URL path already in use |
-| 409 | `yaml_dashboard_readonly` | Cannot modify YAML dashboard |
-| 409 | `default_dashboard_protected` | Cannot delete default dashboard |
-
-## Claude/MCP Integration
-
-The `mcp_tools.json` file contains tool definitions for integrating with Claude or other MCP-compatible AI systems.
-
-### Setup with Claude
-
-1. Locate the `mcp_tools.json` file in the component directory
-2. Update the `baseUrl` to match your Home Assistant instance
-3. Configure your MCP server to use these tool definitions
-4. Set the Bearer token in your MCP authentication config
-
-### Available Tools
-
-| Tool Name | Description |
-|-----------|-------------|
-| `ha_list_dashboards` | List all dashboards |
+### Dashboards
+| Tool | Description |
+|------|-------------|
+| `ha_list_dashboards` | List all Lovelace dashboards |
 | `ha_get_dashboard` | Get dashboard metadata |
 | `ha_get_dashboard_config` | Get dashboard views/cards |
 | `ha_create_dashboard` | Create new dashboard |
-| `ha_update_dashboard` | Full update metadata |
-| `ha_patch_dashboard` | Partial update metadata |
-| `ha_update_dashboard_config` | Upload dashboard config |
+| `ha_update_dashboard` | Update dashboard metadata |
+| `ha_update_dashboard_config` | Replace dashboard config |
 | `ha_delete_dashboard` | Delete dashboard |
 
-## Troubleshooting
+### Automations
+| Tool | Description |
+|------|-------------|
+| `ha_list_automations` | List all automations |
+| `ha_get_automation` | Get automation details |
+| `ha_create_automation` | Create new automation |
+| `ha_update_automation` | Update automation |
+| `ha_delete_automation` | Delete automation |
+| `ha_trigger_automation` | Manually trigger automation |
 
-### "Dashboard collection not available"
+### Scripts
+| Tool | Description |
+|------|-------------|
+| `ha_list_scripts` | List all scripts |
+| `ha_get_script` | Get script details |
+| `ha_create_script` | Create new script |
+| `ha_update_script` | Update script |
+| `ha_delete_script` | Delete script |
+| `ha_run_script` | Run a script |
+| `ha_stop_script` | Stop a running script |
 
-This error occurs when Lovelace is running in YAML mode. The component requires storage mode for creating/modifying dashboards.
+### Scenes
+| Tool | Description |
+|------|-------------|
+| `ha_list_scenes` | List all scenes |
+| `ha_get_scene` | Get scene details |
+| `ha_create_scene` | Create new scene |
+| `ha_update_scene` | Update scene |
+| `ha_delete_scene` | Delete scene |
+| `ha_activate_scene` | Activate a scene |
 
-To check your mode:
-1. Go to Settings > Dashboards
-2. If you see "Edit Dashboard" in the overflow menu, you're in storage mode
+### System Discovery
+| Tool | Description |
+|------|-------------|
+| `ha_list_entities` | List entities with filtering |
+| `ha_get_entity` | Get entity details |
+| `ha_list_domains` | List entity domains |
+| `ha_list_devices` | List devices with filtering |
+| `ha_get_device` | Get device details |
+| `ha_list_areas` | List all areas |
+| `ha_get_area` | Get area details |
+| `ha_list_floors` | List all floors |
+| `ha_list_integrations` | List active integrations |
+| `ha_list_services` | List available services |
+| `ha_get_service` | Get service details |
 
-### "URL path must contain a hyphen"
+### Logs
+| Tool | Description |
+|------|-------------|
+| `ha_get_logs` | Get recent log entries |
+| `ha_get_error_logs` | Get error/warning logs |
 
-Home Assistant requires dashboard URL paths to contain at least one hyphen. Use paths like `my-dashboard` instead of `mydashboard`.
+## REST API
 
-### "Admin permission required"
+All endpoints are available at `/api/config_mcp/`:
 
-Write operations (POST, PUT, PATCH, DELETE) require the token owner to be an admin user.
+| Resource | Endpoint |
+|----------|----------|
+| MCP Server | `/api/config_mcp/mcp` |
+| Dashboards | `/api/config_mcp/dashboards` |
+| Automations | `/api/config_mcp/automations` |
+| Scripts | `/api/config_mcp/scripts` |
+| Scenes | `/api/config_mcp/scenes` |
+| Entities | `/api/config_mcp/entities` |
+| Devices | `/api/config_mcp/devices` |
+| Areas | `/api/config_mcp/areas` |
+| Floors | `/api/config_mcp/floors` |
+| Integrations | `/api/config_mcp/integrations` |
+| Services | `/api/config_mcp/services` |
+| Logs | `/api/config_mcp/logs` |
+
+## Authentication
+
+All endpoints require a valid Home Assistant long-lived access token:
+
+```bash
+curl -H "Authorization: Bearer YOUR_TOKEN" \
+  https://your-ha-instance:8123/api/config_mcp/dashboards
+```
+
+## Configuration
+
+After installation, configure via Settings > Integrations > Configuration MCP Server > Configure:
+
+1. **MCP Server** - Enable/disable MCP server, OAuth, and log reading
+2. **System Discovery** - Enable/disable entity, device, area, integration, and service discovery
+3. **Lovelace Dashboards** - Granular read/create/update/delete permissions
+4. **Automations** - Granular read/create/update/delete permissions
+5. **Scripts** - Granular read/create/update/delete permissions
+6. **Scenes** - Granular read/create/update/delete permissions
 
 ## License
 
-MIT License - See LICENSE file for details.
+MIT License
 
 ## Contributing
 

@@ -1,0 +1,14 @@
+{
+  "domain": "config_mcp",
+  "name": "Configuration MCP Server",
+  "version": "1.0.0",
+  "documentation": "https://github.com/keith-gamble/config-mcp",
+  "dependencies": ["lovelace", "http"],
+  "after_dependencies": ["hass_oidc_auth"],
+  "codeowners": ["@keith-gamble"],
+  "iot_class": "local_push",
+  "integration_type": "service",
+  "config_flow": true,
+  "single_config_entry": true,
+  "requirements": ["mcp==1.14.1", "aiohttp-sse==2.2.0", "anyio==4.10.0", "PyJWT>=2.8.0", "cryptography>=41.0.0"]
+}
