@@ -489,6 +489,16 @@ class AutomationDetailView(HomeAssistantView):
         entity_id = self._get_entity_id(automation_id)
         entity = _get_automation_entity(hass, entity_id)
 
+        # If not found and automation_id doesn't look like an entity_id, search by unique_id
+        # This handles numeric IDs from UI-created automations (e.g., "1765219976897")
+        if entity is None and not automation_id.startswith("automation."):
+            component = get_automation_component(hass)
+            if component is not None:
+                for ent in component.entities:
+                    if ent.unique_id == automation_id:
+                        entity = ent
+                        break
+
         if entity is None:
             return self.json_message(
                 f"Automation '{automation_id}' not found",

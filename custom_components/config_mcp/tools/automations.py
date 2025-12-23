@@ -75,7 +75,17 @@ async def get_automation(hass: HomeAssistant, arguments: dict[str, Any]) -> dict
     if component is None:
         raise ValueError(f"Automation '{automation_id}' not found")
 
+    # First try to get by entity_id
     entity = component.get_entity(entity_id)
+
+    # If not found and automation_id doesn't look like an entity_id, search by unique_id
+    # This handles numeric IDs from UI-created automations (e.g., "1765219976897")
+    if entity is None and not automation_id.startswith("automation."):
+        for ent in component.entities:
+            if ent.unique_id == automation_id:
+                entity = ent
+                break
+
     if entity is None:
         raise ValueError(f"Automation '{automation_id}' not found")
 
