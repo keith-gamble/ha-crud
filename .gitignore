@@ -20,8 +20,10 @@ Thumbs.db
 
 # Claude
 .claude/
+.claude-flow/
+.mcp.json
 
 # Local settings
 .env
 *.local.md
-
+CLAUDE_FLOW_GUIDE.md

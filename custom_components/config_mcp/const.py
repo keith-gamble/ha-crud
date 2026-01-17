@@ -40,6 +40,12 @@ CONF_SCENES_CREATE = "scenes_create"
 CONF_SCENES_UPDATE = "scenes_update"
 CONF_SCENES_DELETE = "scenes_delete"
 
+# Helpers (input_boolean, input_number, input_text, input_select, input_datetime, counter, timer)
+CONF_HELPERS_READ = "helpers_read"
+CONF_HELPERS_CREATE = "helpers_create"
+CONF_HELPERS_UPDATE = "helpers_update"
+CONF_HELPERS_DELETE = "helpers_delete"
+
 # Logs (MCP only - for debugging/verification)
 CONF_LOGS_READ = "logs_read"
 
@@ -99,6 +105,17 @@ DISCOVERY_RESOURCES = [
     RESOURCE_SERVICES,
 ]
 
+# Helper domains (input_* helpers and utility helpers)
+HELPER_DOMAINS = [
+    "input_boolean",
+    "input_number",
+    "input_text",
+    "input_select",
+    "input_datetime",
+    "counter",
+    "timer",
+]
+
 # MCP Server configuration key
 CONF_MCP_SERVER = "mcp_server"
 CONF_MCP_OAUTH_ENABLED = "mcp_oauth_enabled"
@@ -138,6 +155,11 @@ DEFAULT_OPTIONS = {
     CONF_SCENES_CREATE: False,
     CONF_SCENES_UPDATE: False,
     CONF_SCENES_DELETE: False,
+    # Helpers - all disabled by default
+    CONF_HELPERS_READ: False,
+    CONF_HELPERS_CREATE: False,
+    CONF_HELPERS_UPDATE: False,
+    CONF_HELPERS_DELETE: False,
     # Logs - disabled by default for security
     CONF_LOGS_READ: False,
     # Categories - read enabled, write disabled by default
@@ -226,6 +248,12 @@ ERR_SCRIPT_INVALID_CONFIG = "script_invalid_config"
 ERR_SCENE_NOT_FOUND = "scene_not_found"
 ERR_SCENE_EXISTS = "scene_already_exists"
 ERR_SCENE_INVALID_CONFIG = "scene_invalid_config"
+
+# Error codes - Helpers
+ERR_HELPER_NOT_FOUND = "helper_not_found"
+ERR_HELPER_EXISTS = "helper_already_exists"
+ERR_HELPER_INVALID_CONFIG = "helper_invalid_config"
+ERR_HELPER_INVALID_DOMAIN = "helper_invalid_domain"
 
 # Error codes - Logs
 ERR_LOG_NOT_FOUND = "log_not_found"

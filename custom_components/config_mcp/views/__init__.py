@@ -60,6 +60,10 @@ from .categories import (
     LabelDetailView,
     LabelListView,
 )
+from .helpers import (
+    HelperDetailView,
+    HelperListView,
+)
 
 __all__ = [
     # Dashboard views
@@ -110,4 +114,7 @@ __all__ = [
     "CategoryDetailView",
     "LabelListView",
     "LabelDetailView",
+    # Helper views
+    "HelperListView",
+    "HelperDetailView",
 ]

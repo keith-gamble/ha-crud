@@ -9,6 +9,7 @@ A Home Assistant custom component that exposes an MCP (Model Context Protocol) s
 - **Automations** - Create, update, delete, enable/disable, and trigger automations
 - **Scripts** - Create, update, delete, run, and stop scripts
 - **Scenes** - Create, update, delete, and activate scenes
+- **Helpers** - Create, update, delete input helpers (input_boolean, input_number, input_text, input_select, input_datetime, counter, timer)
 - **System Discovery** - Query entities, devices, areas, floors, integrations, and services
 - **Categories & Labels** - Manage categories and labels for organizing automations/scripts
 - **Log Reading** - Access Home Assistant logs for debugging
@@ -96,6 +97,24 @@ Then run `/mcp` in Claude Code and select "Authenticate" to login via browser.
 | `ha_delete_scene` | Delete scene |
 | `ha_activate_scene` | Activate a scene |
 
+### Helpers
+| Tool | Description |
+|------|-------------|
+| `ha_list_helpers` | List all helpers with optional domain filter |
+| `ha_get_helper` | Get helper details by entity_id |
+| `ha_create_helper` | Create new helper (input_boolean, input_number, etc.) |
+| `ha_update_helper` | Update helper configuration |
+| `ha_delete_helper` | Delete helper |
+
+**Supported helper domains:**
+- `input_boolean` - Toggle switches
+- `input_number` - Numeric inputs with min/max/step
+- `input_text` - Text inputs with pattern validation
+- `input_select` - Dropdown selections
+- `input_datetime` - Date and/or time inputs
+- `counter` - Increment/decrement counters
+- `timer` - Duration timers
+
 ### System Discovery
 | Tool | Description |
 |------|-------------|
@@ -144,6 +163,7 @@ All endpoints are available at `/api/config_mcp/`:
 | Automations | `/api/config_mcp/automations` |
 | Scripts | `/api/config_mcp/scripts` |
 | Scenes | `/api/config_mcp/scenes` |
+| Helpers | `/api/config_mcp/helpers` |
 | Entities | `/api/config_mcp/entities` |
 | Devices | `/api/config_mcp/devices` |
 | Areas | `/api/config_mcp/areas` |
@@ -173,7 +193,8 @@ After installation, configure via Settings > Integrations > Configuration MCP Se
 4. **Automations** - Granular read/create/update/delete permissions
 5. **Scripts** - Granular read/create/update/delete permissions
 6. **Scenes** - Granular read/create/update/delete permissions
-7. **Categories & Labels** - Manage organizational categories and labels
+7. **Helpers** - Granular read/create/update/delete permissions for input helpers
+8. **Categories & Labels** - Manage organizational categories and labels
 
 ## License
 

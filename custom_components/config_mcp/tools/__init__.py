@@ -48,6 +48,7 @@ TOOL_MODULES = [
     "scenes",
     "logs",
     "categories",  # Categories and labels for organization
+    "helpers",  # Input helpers (input_boolean, input_number, etc.)
 ]
 
 

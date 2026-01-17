@@ -32,6 +32,10 @@ from .const import (
     CONF_DISCOVERY_INTEGRATIONS,
     CONF_DISCOVERY_SERVICES,
     CONF_ENABLED_RESOURCES,
+    CONF_HELPERS_CREATE,
+    CONF_HELPERS_DELETE,
+    CONF_HELPERS_READ,
+    CONF_HELPERS_UPDATE,
     CONF_LABELS_CREATE,
     CONF_LABELS_DELETE,
     CONF_LABELS_READ,
@@ -165,6 +169,7 @@ class HaCrudOptionsFlow(OptionsFlow):
                 "automations",
                 "scripts",
                 "scenes",
+                "helpers",
                 "categories",
             ],
         )
@@ -471,6 +476,42 @@ class HaCrudOptionsFlow(OptionsFlow):
                     vol.Required(
                         CONF_LABELS_DELETE,
                         default=self._options.get(CONF_LABELS_DELETE, False),
+                    ): bool,
+                }
+            ),
+        )
+
+    async def async_step_helpers(
+        self, user_input: dict[str, Any] | None = None
+    ) -> FlowResult:
+        """Configure helpers API."""
+        # Initialize options if not already done
+        if not self._options:
+            self._options = _migrate_legacy_options(dict(self.config_entry.options))
+
+        if user_input is not None:
+            self._options.update(user_input)
+            return self.async_create_entry(title="", data=self._options)
+
+        return self.async_show_form(
+            step_id="helpers",
+            data_schema=vol.Schema(
+                {
+                    vol.Required(
+                        CONF_HELPERS_READ,
+                        default=self._options.get(CONF_HELPERS_READ, False),
+                    ): bool,
+                    vol.Required(
+                        CONF_HELPERS_CREATE,
+                        default=self._options.get(CONF_HELPERS_CREATE, False),
+                    ): bool,
+                    vol.Required(
+                        CONF_HELPERS_UPDATE,
+                        default=self._options.get(CONF_HELPERS_UPDATE, False),
+                    ): bool,
+                    vol.Required(
+                        CONF_HELPERS_DELETE,
+                        default=self._options.get(CONF_HELPERS_DELETE, False),
                     ): bool,
                 }
             ),

@@ -34,6 +34,10 @@ from .const import (
     CONF_DISCOVERY_INTEGRATIONS,
     CONF_DISCOVERY_SERVICES,
     CONF_ENABLED_RESOURCES,
+    CONF_HELPERS_CREATE,
+    CONF_HELPERS_DELETE,
+    CONF_HELPERS_READ,
+    CONF_HELPERS_UPDATE,
     CONF_LABELS_CREATE,
     CONF_LABELS_DELETE,
     CONF_LABELS_READ,
@@ -58,6 +62,7 @@ from .const import (
     RESOURCE_DASHBOARDS,
     RESOURCE_DEVICES,
     RESOURCE_ENTITIES,
+    RESOURCE_HELPERS,
     RESOURCE_INTEGRATIONS,
     RESOURCE_LABELS,
     RESOURCE_LOGS,
@@ -86,6 +91,8 @@ from .views import (
     EntityUsageView,
     FloorDetailView,
     FloorListView,
+    HelperDetailView,
+    HelperListView,
     IntegrationDetailView,
     IntegrationListView,
     LabelDetailView,
@@ -480,3 +487,16 @@ def _register_views(hass: HomeAssistant, options: dict[str, Any]) -> None:
         hass.http.register_view(LabelDetailView())
         _REGISTERED_VIEWS.add(RESOURCE_LABELS)
         _LOGGER.info("Registered label API endpoints at /api/config_mcp/labels")
+
+    # Helper views (if any helper permission is enabled)
+    helpers_enabled = (
+        options.get(CONF_HELPERS_READ) or
+        options.get(CONF_HELPERS_CREATE) or
+        options.get(CONF_HELPERS_UPDATE) or
+        options.get(CONF_HELPERS_DELETE)
+    )
+    if helpers_enabled and RESOURCE_HELPERS not in _REGISTERED_VIEWS:
+        hass.http.register_view(HelperListView())
+        hass.http.register_view(HelperDetailView())
+        _REGISTERED_VIEWS.add(RESOURCE_HELPERS)
+        _LOGGER.info("Registered helper API endpoints at /api/config_mcp/helpers")
