@@ -1,6 +1,6 @@
 """Constants for Configuration MCP Server component."""
 
-DOMAIN = "config_mcp"
+DOMAIN = "config_mcp_test"
 
 # Configuration keys - Discovery APIs (read-only)
 CONF_DISCOVERY_ENTITIES = "discovery_entities"

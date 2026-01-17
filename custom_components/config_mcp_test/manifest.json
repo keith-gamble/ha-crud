@@ -1,6 +1,6 @@
 {
-  "domain": "config_mcp",
-  "name": "Configuration MCP Server",
+  "domain": "config_mcp_test",
+  "name": "Configuration MCP Server (Test)",
   "version": "1.2.1",
   "documentation": "https://github.com/keith-gamble/config-mcp",
   "dependencies": ["lovelace", "http"],
