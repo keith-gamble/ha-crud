@@ -1,8 +1,8 @@
 """MCP Tools for Home Assistant Helpers.
 
 Provides tools for managing Home Assistant helpers (input_boolean, input_number,
-input_text, input_select, input_datetime, counter, timer) via the component's
-storage collection API.
+input_text, input_select, input_datetime, counter, timer) via the Home Assistant
+Store API for direct storage file access.
 
 Each tool registers itself using the @mcp_tool decorator.
 """
@@ -10,15 +10,20 @@ Each tool registers itself using the @mcp_tool decorator.
 from __future__ import annotations
 
 import logging
+import uuid
 from typing import Any
 
 from homeassistant.core import HomeAssistant
 from homeassistant.helpers import entity_registry as er
+from homeassistant.helpers.storage import Store
 
 from ..mcp_registry import mcp_tool
 from ..const import HELPER_DOMAINS
 
 _LOGGER = logging.getLogger(__name__)
+
+# Storage version must match Home Assistant's internal version for these domains
+STORAGE_VERSION = 1
 
 
 # Domain-specific required fields for creation
@@ -45,7 +50,7 @@ HELPER_OPTIONAL_FIELDS: dict[str, list[str]] = {
 
 
 async def _get_helpers_for_domain(hass: HomeAssistant, domain: str) -> list[dict[str, Any]]:
-    """Get all helpers for a specific domain using the component's storage.
+    """Get all helpers for a specific domain using the Store API.
 
     Args:
         hass: Home Assistant instance
@@ -56,39 +61,24 @@ async def _get_helpers_for_domain(hass: HomeAssistant, domain: str) -> list[dict
     """
     helpers = []
 
-    # Access the component's storage collection
-    component_data = hass.data.get(domain)
-    if component_data is None:
+    # Use Store API to read from .storage/core.{domain}
+    store: Store[dict[str, Any]] = Store(hass, STORAGE_VERSION, f"core.{domain}")
+    data = await store.async_load()
+
+    if data is None:
         return helpers
 
-    collection = None
+    # The storage format has an "items" key containing the list of helpers
+    items = data.get("items", [])
 
-    # Try to get the storage collection
-    if hasattr(component_data, "storage_collection"):
-        collection = component_data.storage_collection
-    elif hasattr(component_data, "async_items"):
-        collection = component_data
-    elif isinstance(component_data, dict):
-        collection = component_data.get("collection") or component_data.get("storage_collection")
-
-    if collection is not None and hasattr(collection, "async_items"):
-        items = collection.async_items()
-        for item in items:
-            if isinstance(item, dict):
-                helpers.append({
-                    "id": item.get("id"),
-                    "name": item.get("name"),
-                    "domain": domain,
-                    **{k: v for k, v in item.items() if k not in ("id", "name")},
-                })
-            elif hasattr(item, "as_dict"):
-                item_dict = item.as_dict()
-                helpers.append({
-                    "id": item_dict.get("id"),
-                    "name": item_dict.get("name"),
-                    "domain": domain,
-                    **{k: v for k, v in item_dict.items() if k not in ("id", "name")},
-                })
+    for item in items:
+        if isinstance(item, dict):
+            helpers.append({
+                "id": item.get("id"),
+                "name": item.get("name"),
+                "domain": domain,
+                **{k: v for k, v in item.items() if k not in ("id", "name")},
+            })
 
     return helpers
 
@@ -97,7 +87,7 @@ async def _get_helper_by_id(
     hass: HomeAssistant,
     helper_id: str
 ) -> tuple[str | None, dict[str, Any] | None]:
-    """Get a specific helper by ID.
+    """Get a specific helper by ID using the Store API.
 
     Args:
         hass: Home Assistant instance
@@ -108,43 +98,21 @@ async def _get_helper_by_id(
     """
     for domain in HELPER_DOMAINS:
         try:
-            component_data = hass.data.get(domain)
-            if component_data is None:
+            store: Store[dict[str, Any]] = Store(hass, STORAGE_VERSION, f"core.{domain}")
+            data = await store.async_load()
+
+            if data is None:
                 continue
 
-            collection = None
-            if hasattr(component_data, "storage_collection"):
-                collection = component_data.storage_collection
-            elif hasattr(component_data, "async_items"):
-                collection = component_data
-            elif isinstance(component_data, dict):
-                collection = component_data.get("collection") or component_data.get("storage_collection")
-
-            if collection is not None and hasattr(collection, "async_items"):
-                items = collection.async_items()
-                for item in items:
-                    item_id = None
-                    if isinstance(item, dict):
-                        item_id = item.get("id")
-                    elif hasattr(item, "id"):
-                        item_id = item.id
-
-                    if item_id == helper_id:
-                        if isinstance(item, dict):
-                            return domain, {
-                                "id": item.get("id"),
-                                "name": item.get("name"),
-                                "domain": domain,
-                                **{k: v for k, v in item.items() if k not in ("id", "name")},
-                            }
-                        elif hasattr(item, "as_dict"):
-                            item_dict = item.as_dict()
-                            return domain, {
-                                "id": item_dict.get("id"),
-                                "name": item_dict.get("name"),
-                                "domain": domain,
-                                **{k: v for k, v in item_dict.items() if k not in ("id", "name")},
-                            }
+            items = data.get("items", [])
+            for item in items:
+                if isinstance(item, dict) and item.get("id") == helper_id:
+                    return domain, {
+                        "id": item.get("id"),
+                        "name": item.get("name"),
+                        "domain": domain,
+                        **{k: v for k, v in item.items() if k not in ("id", "name")},
+                    }
         except Exception as err:
             _LOGGER.warning("Error searching for helper in domain %s: %s", domain, err)
             continue
@@ -152,12 +120,31 @@ async def _get_helper_by_id(
     return None, None
 
 
+def _generate_helper_id(name: str) -> str:
+    """Generate a helper ID from the name.
+
+    Args:
+        name: The helper name
+
+    Returns:
+        A valid helper ID
+    """
+    # Convert name to lowercase and replace spaces with underscores
+    helper_id = name.lower().replace(" ", "_")
+    # Remove any characters that aren't alphanumeric or underscores
+    helper_id = "".join(c for c in helper_id if c.isalnum() or c == "_")
+    # Ensure it doesn't start with a number
+    if helper_id and helper_id[0].isdigit():
+        helper_id = f"_{helper_id}"
+    return helper_id or f"helper_{uuid.uuid4().hex[:8]}"
+
+
 async def _create_helper(
     hass: HomeAssistant,
     domain: str,
     config: dict[str, Any],
 ) -> dict[str, Any]:
-    """Create a new helper.
+    """Create a new helper using the Store API.
 
     Args:
         hass: Home Assistant instance
@@ -173,41 +160,44 @@ async def _create_helper(
     if domain not in HELPER_DOMAINS:
         raise ValueError(f"Invalid helper domain: {domain}")
 
-    component_data = hass.data.get(domain)
-    if component_data is None:
-        raise ValueError(f"Helper domain {domain} is not loaded")
+    # Use Store API to read/write .storage/core.{domain}
+    store: Store[dict[str, Any]] = Store(hass, STORAGE_VERSION, f"core.{domain}")
+    data = await store.async_load() or {"items": []}
 
-    collection = None
-    if hasattr(component_data, "storage_collection"):
-        collection = component_data.storage_collection
-    elif hasattr(component_data, "async_create_item"):
-        collection = component_data
-    elif isinstance(component_data, dict):
-        collection = component_data.get("collection") or component_data.get("storage_collection")
+    # Generate ID from name if not provided
+    helper_id = config.get("id") or _generate_helper_id(config["name"])
 
-    if collection is None or not hasattr(collection, "async_create_item"):
-        raise ValueError(f"Cannot create helpers for domain {domain}")
+    # Check for duplicate ID
+    existing_ids = {item.get("id") for item in data.get("items", [])}
+    if helper_id in existing_ids:
+        raise ValueError(f"Helper with ID '{helper_id}' already exists")
 
-    # Create the helper
-    created = await collection.async_create_item(config)
+    # Build the helper configuration
+    new_helper = {
+        "id": helper_id,
+        **config,
+    }
 
-    if isinstance(created, dict):
-        return {
-            "id": created.get("id"),
-            "name": created.get("name"),
-            "domain": domain,
-            **{k: v for k, v in created.items() if k not in ("id", "name")},
-        }
-    elif hasattr(created, "as_dict"):
-        item_dict = created.as_dict()
-        return {
-            "id": item_dict.get("id"),
-            "name": item_dict.get("name"),
-            "domain": domain,
-            **{k: v for k, v in item_dict.items() if k not in ("id", "name")},
-        }
-    else:
-        return {"id": str(created), "domain": domain}
+    # Add to items list
+    if "items" not in data:
+        data["items"] = []
+    data["items"].append(new_helper)
+
+    # Save to storage
+    await store.async_save(data)
+
+    # Reload the domain to pick up the new helper
+    try:
+        await hass.services.async_call(domain, "reload", blocking=True)
+    except Exception as err:
+        _LOGGER.warning("Failed to reload %s after creation: %s", domain, err)
+
+    return {
+        "id": helper_id,
+        "name": config.get("name"),
+        "domain": domain,
+        **{k: v for k, v in new_helper.items() if k not in ("id", "name")},
+    }
 
 
 async def _update_helper(
@@ -216,7 +206,7 @@ async def _update_helper(
     helper_id: str,
     updates: dict[str, Any],
 ) -> dict[str, Any]:
-    """Update an existing helper.
+    """Update an existing helper using the Store API.
 
     Args:
         hass: Home Assistant instance
@@ -230,41 +220,43 @@ async def _update_helper(
     Raises:
         ValueError: If update fails
     """
-    component_data = hass.data.get(domain)
-    if component_data is None:
-        raise ValueError(f"Helper domain {domain} is not loaded")
+    # Use Store API to read/write .storage/core.{domain}
+    store: Store[dict[str, Any]] = Store(hass, STORAGE_VERSION, f"core.{domain}")
+    data = await store.async_load()
 
-    collection = None
-    if hasattr(component_data, "storage_collection"):
-        collection = component_data.storage_collection
-    elif hasattr(component_data, "async_update_item"):
-        collection = component_data
-    elif isinstance(component_data, dict):
-        collection = component_data.get("collection") or component_data.get("storage_collection")
+    if data is None:
+        raise ValueError(f"Helper domain {domain} has no stored data")
 
-    if collection is None or not hasattr(collection, "async_update_item"):
-        raise ValueError(f"Cannot update helpers for domain {domain}")
+    items = data.get("items", [])
 
-    # Update the helper
-    updated = await collection.async_update_item(helper_id, updates)
+    # Find and update the helper
+    updated_item = None
+    for i, item in enumerate(items):
+        if isinstance(item, dict) and item.get("id") == helper_id:
+            # Merge updates with existing item (don't change id)
+            items[i] = {**item, **updates, "id": helper_id}
+            updated_item = items[i]
+            break
 
-    if isinstance(updated, dict):
-        return {
-            "id": updated.get("id"),
-            "name": updated.get("name"),
-            "domain": domain,
-            **{k: v for k, v in updated.items() if k not in ("id", "name")},
-        }
-    elif hasattr(updated, "as_dict"):
-        item_dict = updated.as_dict()
-        return {
-            "id": item_dict.get("id"),
-            "name": item_dict.get("name"),
-            "domain": domain,
-            **{k: v for k, v in item_dict.items() if k not in ("id", "name")},
-        }
-    else:
-        return {"id": helper_id, "domain": domain}
+    if updated_item is None:
+        raise ValueError(f"Helper '{helper_id}' not found in {domain}")
+
+    # Save to storage
+    data["items"] = items
+    await store.async_save(data)
+
+    # Reload the domain to pick up the changes
+    try:
+        await hass.services.async_call(domain, "reload", blocking=True)
+    except Exception as err:
+        _LOGGER.warning("Failed to reload %s after update: %s", domain, err)
+
+    return {
+        "id": updated_item.get("id"),
+        "name": updated_item.get("name"),
+        "domain": domain,
+        **{k: v for k, v in updated_item.items() if k not in ("id", "name")},
+    }
 
 
 async def _delete_helper(
@@ -272,7 +264,7 @@ async def _delete_helper(
     domain: str,
     helper_id: str,
 ) -> None:
-    """Delete a helper.
+    """Delete a helper using the Store API.
 
     Args:
         hass: Home Assistant instance
@@ -282,22 +274,31 @@ async def _delete_helper(
     Raises:
         ValueError: If deletion fails
     """
-    component_data = hass.data.get(domain)
-    if component_data is None:
-        raise ValueError(f"Helper domain {domain} is not loaded")
+    # Use Store API to read/write .storage/core.{domain}
+    store: Store[dict[str, Any]] = Store(hass, STORAGE_VERSION, f"core.{domain}")
+    data = await store.async_load()
 
-    collection = None
-    if hasattr(component_data, "storage_collection"):
-        collection = component_data.storage_collection
-    elif hasattr(component_data, "async_delete_item"):
-        collection = component_data
-    elif isinstance(component_data, dict):
-        collection = component_data.get("collection") or component_data.get("storage_collection")
+    if data is None:
+        raise ValueError(f"Helper domain {domain} has no stored data")
 
-    if collection is None or not hasattr(collection, "async_delete_item"):
-        raise ValueError(f"Cannot delete helpers for domain {domain}")
+    items = data.get("items", [])
 
-    await collection.async_delete_item(helper_id)
+    # Find and remove the helper
+    original_count = len(items)
+    items = [item for item in items if not (isinstance(item, dict) and item.get("id") == helper_id)]
+
+    if len(items) == original_count:
+        raise ValueError(f"Helper '{helper_id}' not found in {domain}")
+
+    # Save to storage
+    data["items"] = items
+    await store.async_save(data)
+
+    # Reload the domain to pick up the changes
+    try:
+        await hass.services.async_call(domain, "reload", blocking=True)
+    except Exception as err:
+        _LOGGER.warning("Failed to reload %s after deletion: %s", domain, err)
 
 
 def _format_helper(
