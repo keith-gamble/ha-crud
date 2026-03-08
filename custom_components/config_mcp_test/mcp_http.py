@@ -36,7 +36,7 @@ from .mcp_server import create_mcp_server
 _LOGGER = logging.getLogger(__name__)
 
 # Request timeout in seconds
-REQUEST_TIMEOUT = 60
+REQUEST_TIMEOUT = 120
 
 
 @dataclass
@@ -58,12 +58,12 @@ def create_streams() -> Streams:
     # Client -> Server stream
     read_stream_writer, read_stream = anyio.create_memory_object_stream[
         SessionMessage | Exception
-    ](max_buffer_size=0)
+    ](max_buffer_size=1)
 
     # Server -> Client stream
     write_stream, write_stream_reader = anyio.create_memory_object_stream[
         SessionMessage
-    ](max_buffer_size=0)
+    ](max_buffer_size=1)
 
     return Streams(
         read_stream=read_stream,
@@ -233,6 +233,34 @@ class MCPStreamableView(HomeAssistantView):
             return f"{scheme}://{host}"
         return None
 
+    async def get(self, request: web.Request) -> web.Response:
+        """Handle GET request - SSE endpoint for MCP Streamable HTTP.
+
+        The MCP Streamable HTTP spec defines GET for server-to-client SSE
+        streaming. This stateless implementation doesn't support persistent
+        SSE sessions, so we return 405 with a helpful message. Clients
+        should use POST for all request/response interactions.
+        """
+        # Validate authentication first
+        is_valid, error = await self._validate_request(request)
+        if not is_valid:
+            return self.json_message(
+                error or "Unauthorized",
+                HTTPStatus.UNAUTHORIZED,
+            )
+
+        # SSE streaming not supported in stateless mode
+        return web.json_response(
+            {
+                "jsonrpc": "2.0",
+                "error": {
+                    "code": -32000,
+                    "message": "SSE streaming not supported. Use POST for requests.",
+                },
+            },
+            status=HTTPStatus.OK,
+        )
+
     async def post(self, request: web.Request) -> web.Response:
         """Handle POST request - process a JSON-RPC message.
 
@@ -278,6 +306,7 @@ class MCPStreamableView(HomeAssistantView):
         try:
             # Create the MCP server
             server = create_mcp_server(self._hass)
+            _LOGGER.debug("MCP server created for request")
 
             # Get initialization options (run in executor to avoid blocking)
             init_options = await self._hass.async_add_executor_job(
@@ -291,39 +320,62 @@ class MCPStreamableView(HomeAssistantView):
             message = _parse_message(body)
 
             async with asyncio.timeout(REQUEST_TIMEOUT):
-                async with anyio.create_task_group() as tg:
-                    # Start the server in the background (stateless mode)
-                    async def run_server() -> None:
-                        try:
-                            await server.run(
-                                streams.read_stream,
-                                streams.write_stream,
-                                init_options,
-                                raise_exceptions=True,
-                                stateless=True,
+                try:
+                    async with anyio.create_task_group() as tg:
+                        # Start the server in the background (stateless mode)
+                        async def run_server() -> None:
+                            try:
+                                await server.run(
+                                    streams.read_stream,
+                                    streams.write_stream,
+                                    init_options,
+                                    raise_exceptions=True,
+                                    stateless=True,
+                                )
+                            except anyio.EndOfStream:
+                                _LOGGER.debug("MCP server: read stream ended")
+                            except anyio.ClosedResourceError:
+                                _LOGGER.debug("MCP server: stream closed")
+                            except Exception as e:
+                                _LOGGER.debug("MCP server ended: %s", e)
+
+                        tg.start_soon(run_server)
+
+                        # Send the message to the server (wrapped in SessionMessage)
+                        session_message = SessionMessage(message=message)
+                        _LOGGER.debug("Sending message to MCP server")
+                        await streams.read_stream_writer.send(session_message)
+                        _LOGGER.debug("Message sent to MCP server")
+
+                        # Wait for response (only for requests, not notifications)
+                        if "id" in body:
+                            _LOGGER.debug("Waiting for response from MCP server")
+                            response_session_msg = await streams.write_stream_reader.receive()
+                            _LOGGER.debug("Response received from MCP server")
+                            # Server will exit naturally now that input is closed;
+                            # cancel scope to unblock task group exit
+                            tg.cancel_scope.cancel()
+                            return web.json_response(
+                                _serialize_message(response_session_msg.message)
                             )
-                        except anyio.EndOfStream:
+                        else:
+                            # Notification - no response expected
+                            tg.cancel_scope.cancel()
+                            return web.Response(status=HTTPStatus.ACCEPTED)
+                finally:
+                    # Ensure all stream endpoints are closed to prevent
+                    # resource leaks, even if an exception occurred
+                    for stream in (
+                        streams.read_stream_writer,
+                        streams.read_stream,
+                        streams.write_stream,
+                        streams.write_stream_reader,
+                    ):
+                        try:
+                            await stream.aclose()
+                        except Exception:
                             pass
-                        except Exception as e:
-                            _LOGGER.debug("MCP server ended: %s", e)
-
-                    tg.start_soon(run_server)
-
-                    # Send the message to the server (wrapped in SessionMessage)
-                    session_message = SessionMessage(message=message)
-                    await streams.read_stream_writer.send(session_message)
-
-                    # Wait for response (only for requests, not notifications)
-                    if "id" in body:
-                        response_session_msg = await streams.write_stream_reader.receive()
-                        # Cancel the server task
-                        tg.cancel_scope.cancel()
-                        # Unwrap the response message
-                        return web.json_response(_serialize_message(response_session_msg.message))
-                    else:
-                        # Notification - no response expected
-                        tg.cancel_scope.cancel()
-                        return web.Response(status=HTTPStatus.ACCEPTED)
+                    _LOGGER.debug("All MCP streams closed")
 
         except asyncio.TimeoutError:
             return self.json_message(
