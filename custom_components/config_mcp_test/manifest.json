@@ -3,6 +3,7 @@
   "name": "Configuration MCP Server (Test)",
   "version": "1.3.0",
   "documentation": "https://github.com/jeremiah-mitchell/hass-configuration-mcp",
+  "issue_tracker": "https://github.com/jeremiah-mitchell/hass-configuration-mcp/issues",
   "dependencies": ["lovelace", "http"],
   "after_dependencies": ["hass_oidc_auth"],
   "codeowners": ["@jeremiah-mitchell"],
@@ -10,5 +11,6 @@
   "integration_type": "service",
   "config_flow": true,
   "single_config_entry": true,
+  "loggers": ["custom_components.config_mcp_test"],
   "requirements": ["mcp==1.14.1", "aiohttp-sse==2.2.0", "anyio==4.10.0", "PyJWT>=2.8.0", "cryptography>=41.0.0"]
 }
