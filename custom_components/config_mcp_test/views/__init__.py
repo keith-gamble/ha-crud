@@ -61,6 +61,8 @@ from .categories import (
     LabelListView,
 )
 from .helpers import (
+    ConfigEntryHelperDetailView,
+    ConfigEntryHelperListView,
     HelperDetailView,
     HelperListView,
 )
@@ -117,4 +119,7 @@ __all__ = [
     # Helper views
     "HelperListView",
     "HelperDetailView",
+    # Config entry helper views
+    "ConfigEntryHelperListView",
+    "ConfigEntryHelperDetailView",
 ]
