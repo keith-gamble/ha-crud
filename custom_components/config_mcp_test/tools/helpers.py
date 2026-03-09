@@ -61,7 +61,11 @@ HELPER_OPTIONAL_FIELDS: dict[str, list[str]] = {
 
 
 async def _get_helpers_for_domain(hass: HomeAssistant, domain: str) -> list[dict[str, Any]]:
-    """Get all helpers for a specific domain using the Store API.
+    """Get all helpers for a specific domain.
+
+    Uses the StorageCollection's in-memory data when available (reflects
+    unsaved creates/updates/deletes immediately). Falls back to the Store
+    file if the collection isn't accessible.
 
     Args:
         hass: Home Assistant instance
@@ -72,7 +76,23 @@ async def _get_helpers_for_domain(hass: HomeAssistant, domain: str) -> list[dict
     """
     helpers = []
 
-    # Use Store API to read from .storage/{domain}
+    # Prefer the StorageCollection's in-memory data so changes are visible
+    # immediately without waiting for the 10-second save delay.
+    try:
+        collection = _get_storage_collection(hass, domain)
+        for item in collection.values():
+            if isinstance(item, dict):
+                helpers.append({
+                    "id": item.get("id"),
+                    "name": item.get("name"),
+                    "domain": domain,
+                    **{k: v for k, v in item.items() if k not in ("id", "name")},
+                })
+        return helpers
+    except ValueError:
+        pass  # Fall through to Store-based read
+
+    # Fallback: read from .storage/{domain} on disk
     # HA helper integrations use STORAGE_KEY = DOMAIN (no 'core.' prefix)
     store: Store[dict[str, Any]] = Store(hass, STORAGE_VERSION, domain)
     data = await store.async_load()
