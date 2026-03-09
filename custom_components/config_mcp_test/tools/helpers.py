@@ -134,9 +134,9 @@ async def _get_helper_by_id(
 def _get_storage_collection(hass: HomeAssistant, domain: str) -> Any:
     """Get Home Assistant's internal StorageCollection for a helper domain.
 
-    This accesses the same collection that HA's WebSocket commands
-    ({domain}/create, {domain}/update, {domain}/delete) use, ensuring
-    in-memory state and disk storage stay in sync.
+    Retrieves the StorageCollection by looking up the registered WebSocket
+    handler for '{domain}/create', which is a bound method on the
+    StorageCollectionWebsocket instance that holds a reference to the collection.
 
     Args:
         hass: Home Assistant instance
@@ -148,21 +148,42 @@ def _get_storage_collection(hass: HomeAssistant, domain: str) -> Any:
     Raises:
         ValueError: If the collection is not found
     """
-    instances = hass.data.get(COLLECTION_INSTANCES_KEY)
-    if instances is None:
+    # WS commands are stored in hass.data["websocket_api"][command_type]
+    ws_handlers = hass.data.get("websocket_api")
+    if ws_handlers is None:
         raise ValueError(
-            f"No storage collections found in hass.data. "
+            f"WebSocket API not initialized. Cannot access {domain} collection."
+        )
+
+    # The handler for '{domain}/create' is a bound method on the
+    # StorageCollectionWebsocket instance which exposes .storage_collection
+    handler_info = ws_handlers.get(f"{domain}/create")
+    if handler_info is None:
+        raise ValueError(
+            f"No WebSocket handler for '{domain}/create'. "
             f"Ensure the {domain} integration is loaded."
         )
 
-    collection = instances.get(domain)
-    if collection is None:
+    # handler_info may be the handler directly or a tuple (handler, schema)
+    handler = handler_info[0] if isinstance(handler_info, tuple) else handler_info
+
+    # Unwrap require_admin / async_response decorators to get the bound method
+    while hasattr(handler, "__wrapped__") or hasattr(handler, "func"):
+        handler = getattr(handler, "__wrapped__", None) or handler.func
+
+    ws_instance = getattr(handler, "__self__", None)
+    if ws_instance is None:
         raise ValueError(
-            f"No storage collection found for domain '{domain}'. "
-            f"Ensure the {domain} integration is loaded."
+            f"Could not extract StorageCollectionWebsocket instance for {domain}."
         )
 
-    return collection
+    storage_collection = getattr(ws_instance, "storage_collection", None)
+    if storage_collection is None:
+        raise ValueError(
+            f"StorageCollectionWebsocket for {domain} has no storage_collection."
+        )
+
+    return storage_collection
 
 
 async def _create_helper(
