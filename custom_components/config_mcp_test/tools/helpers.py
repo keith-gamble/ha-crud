@@ -72,8 +72,9 @@ async def _get_helpers_for_domain(hass: HomeAssistant, domain: str) -> list[dict
     """
     helpers = []
 
-    # Use Store API to read from .storage/core.{domain}
-    store: Store[dict[str, Any]] = Store(hass, STORAGE_VERSION, f"core.{domain}")
+    # Use Store API to read from .storage/{domain}
+    # HA helper integrations use STORAGE_KEY = DOMAIN (no 'core.' prefix)
+    store: Store[dict[str, Any]] = Store(hass, STORAGE_VERSION, domain)
     data = await store.async_load()
 
     if data is None:
@@ -109,7 +110,7 @@ async def _get_helper_by_id(
     """
     for domain in HELPER_DOMAINS:
         try:
-            store: Store[dict[str, Any]] = Store(hass, STORAGE_VERSION, f"core.{domain}")
+            store: Store[dict[str, Any]] = Store(hass, STORAGE_VERSION, domain)
             data = await store.async_load()
 
             if data is None:
