@@ -63,6 +63,8 @@ from .categories import (
 from .helpers import (
     HelperDetailView,
     HelperListView,
+    TemplateHelperDetailView,
+    TemplateHelperListView,
 )
 
 __all__ = [
@@ -117,4 +119,7 @@ __all__ = [
     # Helper views
     "HelperListView",
     "HelperDetailView",
+    # Template helper views
+    "TemplateHelperListView",
+    "TemplateHelperDetailView",
 ]

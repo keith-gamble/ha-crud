@@ -3,7 +3,6 @@
 from __future__ import annotations
 
 import logging
-import uuid
 from http import HTTPStatus
 from typing import Any
 
@@ -13,8 +12,11 @@ from homeassistant.components.http import HomeAssistantView
 from homeassistant.core import HomeAssistant
 from homeassistant.helpers.storage import Store
 
+from homeassistant.helpers import entity_registry as er
+
 from ..const import (
     API_BASE_PATH_HELPERS,
+    API_BASE_PATH_TEMPLATE_HELPERS,
     CONF_HELPERS_CREATE,
     CONF_HELPERS_DELETE,
     CONF_HELPERS_READ,
@@ -30,8 +32,12 @@ from ..const import (
 
 _LOGGER = logging.getLogger(__name__)
 
-# Storage version must match Home Assistant's internal version for these domains
+# Storage version for reading helpers via Store API (list/get operations)
 STORAGE_VERSION = 1
+
+# Key used by HA's collection.store_entity_registry_items() to store
+# StorageCollection instances in hass.data
+COLLECTION_INSTANCES_KEY = "collection_instances"
 
 
 def get_config_options(hass: HomeAssistant) -> dict[str, Any]:
@@ -54,23 +60,28 @@ def check_permission(hass: HomeAssistant, permission: str) -> bool:
     return options.get(permission, False)
 
 
-def _generate_helper_id(name: str) -> str:
-    """Generate a helper ID from the name.
+def _get_storage_collection(hass: HomeAssistant, domain: str) -> Any:
+    """Get Home Assistant's internal StorageCollection for a helper domain.
 
-    Args:
-        name: The helper name
-
-    Returns:
-        A valid helper ID
+    This accesses the same collection that HA's WebSocket commands
+    ({domain}/create, {domain}/update, {domain}/delete) use, ensuring
+    in-memory state and disk storage stay in sync.
     """
-    # Convert name to lowercase and replace spaces with underscores
-    helper_id = name.lower().replace(" ", "_")
-    # Remove any characters that aren't alphanumeric or underscores
-    helper_id = "".join(c for c in helper_id if c.isalnum() or c == "_")
-    # Ensure it doesn't start with a number
-    if helper_id and helper_id[0].isdigit():
-        helper_id = f"_{helper_id}"
-    return helper_id or f"helper_{uuid.uuid4().hex[:8]}"
+    instances = hass.data.get(COLLECTION_INSTANCES_KEY)
+    if instances is None:
+        raise ValueError(
+            f"No storage collections found in hass.data. "
+            f"Ensure the {domain} integration is loaded."
+        )
+
+    collection = instances.get(domain)
+    if collection is None:
+        raise ValueError(
+            f"No storage collection found for domain '{domain}'. "
+            f"Ensure the {domain} integration is loaded."
+        )
+
+    return collection
 
 
 async def _get_helpers_for_domain(hass: HomeAssistant, domain: str) -> list[dict[str, Any]]:
@@ -171,7 +182,10 @@ async def _create_helper(
     domain: str,
     config: dict[str, Any],
 ) -> dict[str, Any]:
-    """Create a new helper using the Store API.
+    """Create a new helper using HA's internal StorageCollection.
+
+    Uses the same collection that WebSocket commands ({domain}/create) use,
+    keeping in-memory state and .storage files in sync.
 
     Args:
         hass: Home Assistant instance
@@ -187,43 +201,26 @@ async def _create_helper(
     if domain not in HELPER_DOMAINS:
         raise ValueError(f"Invalid helper domain: {domain}")
 
-    # Use Store API to read/write .storage/core.{domain}
-    store: Store[dict[str, Any]] = Store(hass, STORAGE_VERSION, f"core.{domain}")
-    data = await store.async_load() or {"items": []}
+    collection = _get_storage_collection(hass, domain)
 
-    # Generate ID from name if not provided
-    helper_id = config.get("id") or _generate_helper_id(config["name"])
+    # Remove 'id' if present — the collection generates IDs automatically
+    create_data = {k: v for k, v in config.items() if k != "id"}
 
-    # Check for duplicate ID
-    existing_ids = {item.get("id") for item in data.get("items", [])}
-    if helper_id in existing_ids:
-        raise ValueError(f"Helper with ID '{helper_id}' already exists")
-
-    # Build the helper configuration
-    new_helper = {
-        "id": helper_id,
-        **config,
-    }
-
-    # Add to items list
-    if "items" not in data:
-        data["items"] = []
-    data["items"].append(new_helper)
-
-    # Save to storage
-    await store.async_save(data)
-
-    # Reload the domain to pick up the new helper
     try:
-        await hass.services.async_call(domain, "reload", blocking=True)
-    except Exception as err:
-        _LOGGER.warning("Failed to reload %s after creation: %s", domain, err)
+        item = await collection.async_create_item(create_data)
+    except ValueError as err:
+        raise ValueError(f"Failed to create helper: {err}") from err
+
+    if hasattr(item, "as_dict"):
+        item_data = item.as_dict()
+    elif isinstance(item, dict):
+        item_data = item
+    else:
+        item_data = {"id": str(item)}
 
     return {
-        "id": helper_id,
-        "name": config.get("name"),
         "domain": domain,
-        **{k: v for k, v in new_helper.items() if k not in ("id", "name")},
+        **item_data,
     }
 
 
@@ -233,7 +230,10 @@ async def _update_helper(
     helper_id: str,
     updates: dict[str, Any],
 ) -> dict[str, Any]:
-    """Update an existing helper using the Store API.
+    """Update an existing helper using HA's internal StorageCollection.
+
+    Uses the same collection that WebSocket commands ({domain}/update) use,
+    keeping in-memory state and .storage files in sync.
 
     Args:
         hass: Home Assistant instance
@@ -247,42 +247,28 @@ async def _update_helper(
     Raises:
         ValueError: If update fails
     """
-    # Use Store API to read/write .storage/core.{domain}
-    store: Store[dict[str, Any]] = Store(hass, STORAGE_VERSION, f"core.{domain}")
-    data = await store.async_load()
+    collection = _get_storage_collection(hass, domain)
 
-    if data is None:
-        raise ValueError(f"Helper domain {domain} has no stored data")
+    # Remove 'id' and 'domain' from updates — these can't be changed
+    update_data = {k: v for k, v in updates.items() if k not in ("id", "domain")}
 
-    items = data.get("items", [])
-
-    # Find and update the helper
-    updated_item = None
-    for i, item in enumerate(items):
-        if isinstance(item, dict) and item.get("id") == helper_id:
-            # Merge updates with existing item (don't change id)
-            items[i] = {**item, **updates, "id": helper_id}
-            updated_item = items[i]
-            break
-
-    if updated_item is None:
-        raise ValueError(f"Helper '{helper_id}' not found in {domain}")
-
-    # Save to storage
-    data["items"] = items
-    await store.async_save(data)
-
-    # Reload the domain to pick up the changes
     try:
-        await hass.services.async_call(domain, "reload", blocking=True)
-    except Exception as err:
-        _LOGGER.warning("Failed to reload %s after update: %s", domain, err)
+        item = await collection.async_update_item(helper_id, update_data)
+    except KeyError:
+        raise ValueError(f"Helper '{helper_id}' not found in {domain}")
+    except ValueError as err:
+        raise ValueError(f"Failed to update helper: {err}") from err
+
+    if hasattr(item, "as_dict"):
+        item_data = item.as_dict()
+    elif isinstance(item, dict):
+        item_data = item
+    else:
+        item_data = {"id": helper_id}
 
     return {
-        "id": updated_item.get("id"),
-        "name": updated_item.get("name"),
         "domain": domain,
-        **{k: v for k, v in updated_item.items() if k not in ("id", "name")},
+        **item_data,
     }
 
 
@@ -291,7 +277,10 @@ async def _delete_helper(
     domain: str,
     helper_id: str,
 ) -> None:
-    """Delete a helper using the Store API.
+    """Delete a helper using HA's internal StorageCollection.
+
+    Uses the same collection that WebSocket commands ({domain}/delete) use,
+    keeping in-memory state and .storage files in sync.
 
     Args:
         hass: Home Assistant instance
@@ -301,31 +290,12 @@ async def _delete_helper(
     Raises:
         ValueError: If deletion fails
     """
-    # Use Store API to read/write .storage/core.{domain}
-    store: Store[dict[str, Any]] = Store(hass, STORAGE_VERSION, f"core.{domain}")
-    data = await store.async_load()
+    collection = _get_storage_collection(hass, domain)
 
-    if data is None:
-        raise ValueError(f"Helper domain {domain} has no stored data")
-
-    items = data.get("items", [])
-
-    # Find and remove the helper
-    original_count = len(items)
-    items = [item for item in items if not (isinstance(item, dict) and item.get("id") == helper_id)]
-
-    if len(items) == original_count:
-        raise ValueError(f"Helper '{helper_id}' not found in {domain}")
-
-    # Save to storage
-    data["items"] = items
-    await store.async_save(data)
-
-    # Reload the domain to pick up the changes
     try:
-        await hass.services.async_call(domain, "reload", blocking=True)
-    except Exception as err:
-        _LOGGER.warning("Failed to reload %s after deletion: %s", domain, err)
+        await collection.async_delete_item(helper_id)
+    except KeyError:
+        raise ValueError(f"Helper '{helper_id}' not found in {domain}")
 
 
 class HelperListView(HomeAssistantView):
@@ -675,6 +645,382 @@ class HelperDetailView(HomeAssistantView):
             _LOGGER.exception("Error deleting helper: %s", err)
             return self.json_message(
                 f"Error deleting helper: {err}",
+                HTTPStatus.INTERNAL_SERVER_ERROR,
+            )
+
+        return web.Response(status=HTTPStatus.NO_CONTENT)
+
+
+# Template sub-types available for creation
+TEMPLATE_TYPES = [
+    "alarm_control_panel", "binary_sensor", "button", "cover",
+    "event", "fan", "image", "light", "lock", "number",
+    "select", "sensor", "switch", "update", "vacuum", "weather",
+]
+
+
+class TemplateHelperListView(HomeAssistantView):
+    """View to list and create template-based helpers."""
+
+    url = API_BASE_PATH_TEMPLATE_HELPERS
+    name = "api:config_mcp:template_helpers"
+    requires_auth = True
+
+    async def get(self, request: web.Request) -> web.Response:
+        """Handle GET request - list all template helpers.
+
+        Query params:
+            template_type: Optional filter (e.g., 'sensor', 'binary_sensor')
+
+        Returns:
+            200: JSON array of template helper data
+            403: Permission denied
+        """
+        hass: HomeAssistant = request.app["hass"]
+
+        if not check_permission(hass, CONF_HELPERS_READ):
+            return self.json_message(
+                "Helper read permission is disabled",
+                HTTPStatus.FORBIDDEN,
+            )
+
+        type_filter = request.query.get("template_type")
+        entries = hass.config_entries.async_entries("template")
+
+        results = []
+        for entry in entries:
+            template_type = entry.options.get("template_type", "")
+            if type_filter and template_type != type_filter:
+                continue
+
+            results.append({
+                "entry_id": entry.entry_id,
+                "title": entry.title,
+                "domain": "template",
+                "template_type": template_type,
+                "state": entry.state.value if hasattr(entry.state, "value") else str(entry.state),
+                "options": dict(entry.options),
+            })
+
+        results.sort(key=lambda x: (x.get("template_type", ""), x.get("title", "").lower()))
+        return self.json(results)
+
+    async def post(self, request: web.Request) -> web.Response:
+        """Handle POST request - create a template helper.
+
+        Request body:
+            {
+                "template_type": "sensor",  (required)
+                "name": "My Sensor",  (required)
+                "state": "{{ states('sensor.x') }}",  (required)
+                "unit_of_measurement": "°C",  (optional)
+                "device_class": "temperature",  (optional, omit if not set)
+                "state_class": "measurement",  (optional, omit if not set)
+                "availability": "{{ true }}",  (optional)
+            }
+
+        Returns:
+            201: Template helper created
+            400: Invalid request
+            401: Not authorized
+            403: Permission denied
+        """
+        hass: HomeAssistant = request.app["hass"]
+
+        if not check_permission(hass, CONF_HELPERS_CREATE):
+            return self.json_message(
+                "Helper create permission is disabled",
+                HTTPStatus.FORBIDDEN,
+            )
+
+        user = request.get("hass_user")
+        if user is None or not user.is_admin:
+            return self.json_message(
+                "Admin permission required",
+                HTTPStatus.UNAUTHORIZED,
+            )
+
+        try:
+            body = await request.json()
+        except ValueError:
+            return self.json_message(
+                "Invalid JSON in request body",
+                HTTPStatus.BAD_REQUEST,
+                ERR_INVALID_CONFIG,
+            )
+
+        template_type = body.get("template_type")
+        name = body.get("name")
+        state = body.get("state")
+
+        if not template_type:
+            return self.json_message(
+                "Missing required field: template_type",
+                HTTPStatus.BAD_REQUEST,
+                ERR_HELPER_INVALID_CONFIG,
+            )
+
+        if not name:
+            return self.json_message(
+                "Missing required field: name",
+                HTTPStatus.BAD_REQUEST,
+                ERR_HELPER_INVALID_CONFIG,
+            )
+
+        if not state:
+            return self.json_message(
+                "Missing required field: state",
+                HTTPStatus.BAD_REQUEST,
+                ERR_HELPER_INVALID_CONFIG,
+            )
+
+        try:
+            # Step 1: Initiate config entry flow
+            result = await hass.config_entries.flow.async_init(
+                "template", context={"source": "user"}
+            )
+            flow_id = result["flow_id"]
+
+            # Step 2: Select template sub-type
+            result = await hass.config_entries.flow.async_configure(
+                flow_id, {"next_step_id": template_type}
+            )
+
+            # Step 3: Submit configuration
+            config_data: dict[str, Any] = {"name": name, "state": state}
+            for field in ("unit_of_measurement", "device_class", "state_class",
+                          "availability", "device_id"):
+                if field in body and body[field]:
+                    config_data[field] = body[field]
+
+            result = await hass.config_entries.flow.async_configure(
+                flow_id, config_data
+            )
+        except Exception as err:
+            _LOGGER.exception("Error creating template helper: %s", err)
+            return self.json_message(
+                f"Error creating template helper: {err}",
+                HTTPStatus.BAD_REQUEST,
+                ERR_HELPER_INVALID_CONFIG,
+            )
+
+        if result.get("type") != "create_entry":
+            return self.json_message(
+                f"Unexpected flow result: {result.get('type')}",
+                HTTPStatus.INTERNAL_SERVER_ERROR,
+            )
+
+        entry_result = result.get("result", {})
+        entry_id = (
+            entry_result.entry_id
+            if hasattr(entry_result, "entry_id")
+            else entry_result.get("entry_id")
+        )
+
+        return self.json(
+            {
+                "entry_id": entry_id,
+                "title": result.get("title", name),
+                "domain": "template",
+                "template_type": template_type,
+                "options": result.get("options", config_data),
+                "message": "Template helper created",
+            },
+            HTTPStatus.CREATED,
+        )
+
+
+class TemplateHelperDetailView(HomeAssistantView):
+    """View for single template helper operations."""
+
+    url = API_BASE_PATH_TEMPLATE_HELPERS + "/{entry_id}"
+    name = "api:config_mcp:template_helper"
+    requires_auth = True
+
+    async def get(
+        self, request: web.Request, entry_id: str
+    ) -> web.Response:
+        """Handle GET request - get a single template helper.
+
+        Returns:
+            200: Template helper data with entities
+            403: Permission denied
+            404: Not found
+        """
+        hass: HomeAssistant = request.app["hass"]
+
+        if not check_permission(hass, CONF_HELPERS_READ):
+            return self.json_message(
+                "Helper read permission is disabled",
+                HTTPStatus.FORBIDDEN,
+            )
+
+        entry = hass.config_entries.async_get_entry(entry_id)
+        if entry is None or entry.domain != "template":
+            return self.json_message(
+                f"Template helper '{entry_id}' not found",
+                HTTPStatus.NOT_FOUND,
+                ERR_HELPER_NOT_FOUND,
+            )
+
+        result: dict[str, Any] = {
+            "entry_id": entry.entry_id,
+            "title": entry.title,
+            "domain": "template",
+            "template_type": entry.options.get("template_type", ""),
+            "state": entry.state.value if hasattr(entry.state, "value") else str(entry.state),
+            "supports_options": entry.supports_options,
+            "options": dict(entry.options),
+        }
+
+        # Include associated entities with current state
+        entity_registry = er.async_get(hass)
+        entities = er.async_entries_for_config_entry(entity_registry, entry_id)
+        if entities:
+            entity_entries = []
+            for entity_entry in entities:
+                entity_data: dict[str, Any] = {
+                    "entity_id": entity_entry.entity_id,
+                    "name": entity_entry.name or entity_entry.original_name,
+                    "area_id": entity_entry.area_id,
+                    "disabled": entity_entry.disabled_by is not None,
+                }
+                state = hass.states.get(entity_entry.entity_id)
+                if state:
+                    entity_data["current_state"] = {
+                        "state": state.state,
+                        "attributes": dict(state.attributes),
+                    }
+                entity_entries.append(entity_data)
+            result["entities"] = entity_entries
+
+        return self.json(result)
+
+    async def patch(
+        self, request: web.Request, entry_id: str
+    ) -> web.Response:
+        """Handle PATCH request - update a template helper via options flow.
+
+        Returns:
+            200: Template helper updated
+            400: Invalid request
+            401: Not authorized
+            403: Permission denied
+            404: Not found
+        """
+        hass: HomeAssistant = request.app["hass"]
+
+        if not check_permission(hass, CONF_HELPERS_UPDATE):
+            return self.json_message(
+                "Helper update permission is disabled",
+                HTTPStatus.FORBIDDEN,
+            )
+
+        user = request.get("hass_user")
+        if user is None or not user.is_admin:
+            return self.json_message(
+                "Admin permission required",
+                HTTPStatus.UNAUTHORIZED,
+            )
+
+        entry = hass.config_entries.async_get_entry(entry_id)
+        if entry is None or entry.domain != "template":
+            return self.json_message(
+                f"Template helper '{entry_id}' not found",
+                HTTPStatus.NOT_FOUND,
+                ERR_HELPER_NOT_FOUND,
+            )
+
+        try:
+            body = await request.json()
+        except ValueError:
+            return self.json_message(
+                "Invalid JSON in request body",
+                HTTPStatus.BAD_REQUEST,
+                ERR_INVALID_CONFIG,
+            )
+
+        if not body:
+            return self.json_message(
+                "No updates provided",
+                HTTPStatus.BAD_REQUEST,
+                ERR_INVALID_CONFIG,
+            )
+
+        try:
+            result = await hass.config_entries.options.async_init(entry_id)
+            flow_id = result["flow_id"]
+
+            # Merge current options with updates
+            current_options = dict(entry.options)
+            update_data: dict[str, Any] = {}
+            for field in ("name", "state", "unit_of_measurement", "device_class",
+                          "state_class", "availability"):
+                if field in body:
+                    if body[field]:
+                        update_data[field] = body[field]
+                elif field in current_options:
+                    update_data[field] = current_options[field]
+
+            result = await hass.config_entries.options.async_configure(
+                flow_id, update_data
+            )
+        except Exception as err:
+            _LOGGER.exception("Error updating template helper: %s", err)
+            return self.json_message(
+                f"Error updating template helper: {err}",
+                HTTPStatus.BAD_REQUEST,
+                ERR_HELPER_INVALID_CONFIG,
+            )
+
+        return self.json({
+            "entry_id": entry_id,
+            "title": entry.title,
+            "domain": "template",
+            "options": update_data,
+            "message": "Template helper updated",
+        })
+
+    async def delete(
+        self, request: web.Request, entry_id: str
+    ) -> web.Response:
+        """Handle DELETE request - delete a template helper.
+
+        Returns:
+            204: Template helper deleted
+            401: Not authorized
+            403: Permission denied
+            404: Not found
+        """
+        hass: HomeAssistant = request.app["hass"]
+
+        if not check_permission(hass, CONF_HELPERS_DELETE):
+            return self.json_message(
+                "Helper delete permission is disabled",
+                HTTPStatus.FORBIDDEN,
+            )
+
+        user = request.get("hass_user")
+        if user is None or not user.is_admin:
+            return self.json_message(
+                "Admin permission required",
+                HTTPStatus.UNAUTHORIZED,
+            )
+
+        entry = hass.config_entries.async_get_entry(entry_id)
+        if entry is None or entry.domain != "template":
+            return self.json_message(
+                f"Template helper '{entry_id}' not found",
+                HTTPStatus.NOT_FOUND,
+                ERR_HELPER_NOT_FOUND,
+            )
+
+        try:
+            await hass.config_entries.async_remove(entry_id)
+        except Exception as err:
+            _LOGGER.exception("Error deleting template helper: %s", err)
+            return self.json_message(
+                f"Error deleting template helper: {err}",
                 HTTPStatus.INTERNAL_SERVER_ERROR,
             )
 

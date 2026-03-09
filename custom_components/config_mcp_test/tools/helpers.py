@@ -1,8 +1,9 @@
 """MCP Tools for Home Assistant Helpers.
 
 Provides tools for managing Home Assistant helpers (input_boolean, input_number,
-input_text, input_select, input_datetime, counter, timer) via the Home Assistant
-Store API for direct storage file access.
+input_text, input_select, input_datetime, counter, timer) via Home Assistant's
+internal StorageCollection API, which keeps in-memory state and .storage files
+in sync (fixing BUG 3 — Store API cache bypass).
 
 Each tool registers itself using the @mcp_tool decorator.
 """
@@ -10,7 +11,6 @@ Each tool registers itself using the @mcp_tool decorator.
 from __future__ import annotations
 
 import logging
-import uuid
 from typing import Any
 
 from homeassistant.core import HomeAssistant
@@ -22,30 +22,39 @@ from ..const import HELPER_DOMAINS
 
 _LOGGER = logging.getLogger(__name__)
 
-# Storage version must match Home Assistant's internal version for these domains
+# Storage version for reading helpers via Store API (list/get operations)
 STORAGE_VERSION = 1
+
+# Key used by HA's collection.store_entity_registry_items() to store
+# StorageCollection instances in hass.data
+COLLECTION_INSTANCES_KEY = "collection_instances"
 
 
 # Domain-specific required fields for creation
 HELPER_CREATE_FIELDS: dict[str, list[str]] = {
     "input_boolean": [],  # Only name required
+    "input_button": [],  # Only name required
     "input_number": ["min", "max"],  # min and max are required
     "input_text": [],  # Only name required
     "input_select": ["options"],  # options list is required
     "input_datetime": [],  # Only name required
     "counter": [],  # Only name required
     "timer": [],  # Only name required
+    "schedule": [],  # Only name required; schedule blocks added separately
 }
 
 # Domain-specific optional fields
 HELPER_OPTIONAL_FIELDS: dict[str, list[str]] = {
     "input_boolean": ["icon"],
+    "input_button": ["icon"],
     "input_number": ["icon", "mode", "step", "unit_of_measurement"],
     "input_text": ["icon", "min", "max", "pattern", "mode"],
     "input_select": ["icon"],
     "input_datetime": ["icon", "has_date", "has_time"],
     "counter": ["icon", "initial", "minimum", "maximum", "step", "restore"],
     "timer": ["icon", "duration", "restore"],
+    "schedule": ["icon", "monday", "tuesday", "wednesday", "thursday",
+                 "friday", "saturday", "sunday"],
 }
 
 
@@ -120,23 +129,38 @@ async def _get_helper_by_id(
     return None, None
 
 
-def _generate_helper_id(name: str) -> str:
-    """Generate a helper ID from the name.
+def _get_storage_collection(hass: HomeAssistant, domain: str) -> Any:
+    """Get Home Assistant's internal StorageCollection for a helper domain.
+
+    This accesses the same collection that HA's WebSocket commands
+    ({domain}/create, {domain}/update, {domain}/delete) use, ensuring
+    in-memory state and disk storage stay in sync.
 
     Args:
-        name: The helper name
+        hass: Home Assistant instance
+        domain: The helper domain (e.g., 'input_boolean')
 
     Returns:
-        A valid helper ID
+        The StorageCollection instance for the domain
+
+    Raises:
+        ValueError: If the collection is not found
     """
-    # Convert name to lowercase and replace spaces with underscores
-    helper_id = name.lower().replace(" ", "_")
-    # Remove any characters that aren't alphanumeric or underscores
-    helper_id = "".join(c for c in helper_id if c.isalnum() or c == "_")
-    # Ensure it doesn't start with a number
-    if helper_id and helper_id[0].isdigit():
-        helper_id = f"_{helper_id}"
-    return helper_id or f"helper_{uuid.uuid4().hex[:8]}"
+    instances = hass.data.get(COLLECTION_INSTANCES_KEY)
+    if instances is None:
+        raise ValueError(
+            f"No storage collections found in hass.data. "
+            f"Ensure the {domain} integration is loaded."
+        )
+
+    collection = instances.get(domain)
+    if collection is None:
+        raise ValueError(
+            f"No storage collection found for domain '{domain}'. "
+            f"Ensure the {domain} integration is loaded."
+        )
+
+    return collection
 
 
 async def _create_helper(
@@ -144,7 +168,10 @@ async def _create_helper(
     domain: str,
     config: dict[str, Any],
 ) -> dict[str, Any]:
-    """Create a new helper using the Store API.
+    """Create a new helper using HA's internal StorageCollection.
+
+    Uses the same collection that WebSocket commands ({domain}/create) use,
+    keeping in-memory state and .storage files in sync.
 
     Args:
         hass: Home Assistant instance
@@ -160,43 +187,27 @@ async def _create_helper(
     if domain not in HELPER_DOMAINS:
         raise ValueError(f"Invalid helper domain: {domain}")
 
-    # Use Store API to read/write .storage/core.{domain}
-    store: Store[dict[str, Any]] = Store(hass, STORAGE_VERSION, f"core.{domain}")
-    data = await store.async_load() or {"items": []}
+    collection = _get_storage_collection(hass, domain)
 
-    # Generate ID from name if not provided
-    helper_id = config.get("id") or _generate_helper_id(config["name"])
+    # Remove 'id' if present — the collection generates IDs automatically
+    create_data = {k: v for k, v in config.items() if k != "id"}
 
-    # Check for duplicate ID
-    existing_ids = {item.get("id") for item in data.get("items", [])}
-    if helper_id in existing_ids:
-        raise ValueError(f"Helper with ID '{helper_id}' already exists")
-
-    # Build the helper configuration
-    new_helper = {
-        "id": helper_id,
-        **config,
-    }
-
-    # Add to items list
-    if "items" not in data:
-        data["items"] = []
-    data["items"].append(new_helper)
-
-    # Save to storage
-    await store.async_save(data)
-
-    # Reload the domain to pick up the new helper
     try:
-        await hass.services.async_call(domain, "reload", blocking=True)
-    except Exception as err:
-        _LOGGER.warning("Failed to reload %s after creation: %s", domain, err)
+        item = await collection.async_create_item(create_data)
+    except ValueError as err:
+        raise ValueError(f"Failed to create helper: {err}") from err
+
+    # The collection returns the created item (dict or object with as_dict())
+    if hasattr(item, "as_dict"):
+        item_data = item.as_dict()
+    elif isinstance(item, dict):
+        item_data = item
+    else:
+        item_data = {"id": str(item)}
 
     return {
-        "id": helper_id,
-        "name": config.get("name"),
         "domain": domain,
-        **{k: v for k, v in new_helper.items() if k not in ("id", "name")},
+        **item_data,
     }
 
 
@@ -206,7 +217,10 @@ async def _update_helper(
     helper_id: str,
     updates: dict[str, Any],
 ) -> dict[str, Any]:
-    """Update an existing helper using the Store API.
+    """Update an existing helper using HA's internal StorageCollection.
+
+    Uses the same collection that WebSocket commands ({domain}/update) use,
+    keeping in-memory state and .storage files in sync.
 
     Args:
         hass: Home Assistant instance
@@ -220,42 +234,28 @@ async def _update_helper(
     Raises:
         ValueError: If update fails
     """
-    # Use Store API to read/write .storage/core.{domain}
-    store: Store[dict[str, Any]] = Store(hass, STORAGE_VERSION, f"core.{domain}")
-    data = await store.async_load()
+    collection = _get_storage_collection(hass, domain)
 
-    if data is None:
-        raise ValueError(f"Helper domain {domain} has no stored data")
+    # Remove 'id' and 'domain' from updates — these can't be changed
+    update_data = {k: v for k, v in updates.items() if k not in ("id", "domain")}
 
-    items = data.get("items", [])
-
-    # Find and update the helper
-    updated_item = None
-    for i, item in enumerate(items):
-        if isinstance(item, dict) and item.get("id") == helper_id:
-            # Merge updates with existing item (don't change id)
-            items[i] = {**item, **updates, "id": helper_id}
-            updated_item = items[i]
-            break
-
-    if updated_item is None:
-        raise ValueError(f"Helper '{helper_id}' not found in {domain}")
-
-    # Save to storage
-    data["items"] = items
-    await store.async_save(data)
-
-    # Reload the domain to pick up the changes
     try:
-        await hass.services.async_call(domain, "reload", blocking=True)
-    except Exception as err:
-        _LOGGER.warning("Failed to reload %s after update: %s", domain, err)
+        item = await collection.async_update_item(helper_id, update_data)
+    except KeyError:
+        raise ValueError(f"Helper '{helper_id}' not found in {domain}")
+    except ValueError as err:
+        raise ValueError(f"Failed to update helper: {err}") from err
+
+    if hasattr(item, "as_dict"):
+        item_data = item.as_dict()
+    elif isinstance(item, dict):
+        item_data = item
+    else:
+        item_data = {"id": helper_id}
 
     return {
-        "id": updated_item.get("id"),
-        "name": updated_item.get("name"),
         "domain": domain,
-        **{k: v for k, v in updated_item.items() if k not in ("id", "name")},
+        **item_data,
     }
 
 
@@ -264,7 +264,10 @@ async def _delete_helper(
     domain: str,
     helper_id: str,
 ) -> None:
-    """Delete a helper using the Store API.
+    """Delete a helper using HA's internal StorageCollection.
+
+    Uses the same collection that WebSocket commands ({domain}/delete) use,
+    keeping in-memory state and .storage files in sync.
 
     Args:
         hass: Home Assistant instance
@@ -274,31 +277,12 @@ async def _delete_helper(
     Raises:
         ValueError: If deletion fails
     """
-    # Use Store API to read/write .storage/core.{domain}
-    store: Store[dict[str, Any]] = Store(hass, STORAGE_VERSION, f"core.{domain}")
-    data = await store.async_load()
+    collection = _get_storage_collection(hass, domain)
 
-    if data is None:
-        raise ValueError(f"Helper domain {domain} has no stored data")
-
-    items = data.get("items", [])
-
-    # Find and remove the helper
-    original_count = len(items)
-    items = [item for item in items if not (isinstance(item, dict) and item.get("id") == helper_id)]
-
-    if len(items) == original_count:
-        raise ValueError(f"Helper '{helper_id}' not found in {domain}")
-
-    # Save to storage
-    data["items"] = items
-    await store.async_save(data)
-
-    # Reload the domain to pick up the changes
     try:
-        await hass.services.async_call(domain, "reload", blocking=True)
-    except Exception as err:
-        _LOGGER.warning("Failed to reload %s after deletion: %s", domain, err)
+        await collection.async_delete_item(helper_id)
+    except KeyError:
+        raise ValueError(f"Helper '{helper_id}' not found in {domain}")
 
 
 def _format_helper(
@@ -353,6 +337,11 @@ def _format_helper(
     elif domain == "timer":
         data["duration"] = helper_config.get("duration")
         data["restore"] = helper_config.get("restore")
+    elif domain == "schedule":
+        for day in ("monday", "tuesday", "wednesday", "thursday",
+                    "friday", "saturday", "sunday"):
+            if day in helper_config:
+                data[day] = helper_config[day]
 
     # Add entity registry info if available
     if entity_entry:
@@ -520,12 +509,14 @@ async def get_helper(hass: HomeAssistant, arguments: dict[str, Any]) -> dict[str
         "Create a new helper entity. Requires specifying the helper domain and "
         "name. Additional fields depend on the domain:\n"
         "- input_boolean: icon\n"
+        "- input_button: icon\n"
         "- input_number: min (required), max (required), step, mode, unit_of_measurement, icon\n"
         "- input_text: min, max, pattern, mode, icon\n"
         "- input_select: options (required), icon\n"
         "- input_datetime: has_date, has_time, icon\n"
         "- counter: initial, minimum, maximum, step, restore, icon\n"
-        "- timer: duration, restore, icon"
+        "- timer: duration, restore, icon\n"
+        "- schedule: icon, monday..sunday (each an array of {from, to, data} blocks)"
     ),
     schema={
         "type": "object",
@@ -605,6 +596,42 @@ async def get_helper(hass: HomeAssistant, arguments: dict[str, Any]) -> dict[str
             "duration": {
                 "type": "string",
                 "description": "Default duration for timer (e.g., '00:01:00' for 1 minute)",
+            },
+            # schedule fields (each day is an array of time blocks)
+            "monday": {
+                "type": "array",
+                "items": {"type": "object"},
+                "description": "Monday schedule blocks: [{from: '08:00:00', to: '17:00:00'}]",
+            },
+            "tuesday": {
+                "type": "array",
+                "items": {"type": "object"},
+                "description": "Tuesday schedule blocks",
+            },
+            "wednesday": {
+                "type": "array",
+                "items": {"type": "object"},
+                "description": "Wednesday schedule blocks",
+            },
+            "thursday": {
+                "type": "array",
+                "items": {"type": "object"},
+                "description": "Thursday schedule blocks",
+            },
+            "friday": {
+                "type": "array",
+                "items": {"type": "object"},
+                "description": "Friday schedule blocks",
+            },
+            "saturday": {
+                "type": "array",
+                "items": {"type": "object"},
+                "description": "Saturday schedule blocks",
+            },
+            "sunday": {
+                "type": "array",
+                "items": {"type": "object"},
+                "description": "Sunday schedule blocks",
             },
         },
         "required": ["domain", "name"],
@@ -749,6 +776,42 @@ async def create_helper(hass: HomeAssistant, arguments: dict[str, Any]) -> dict[
                 "type": "string",
                 "description": "New default duration (timer)",
             },
+            # schedule fields
+            "monday": {
+                "type": "array",
+                "items": {"type": "object"},
+                "description": "New Monday schedule blocks",
+            },
+            "tuesday": {
+                "type": "array",
+                "items": {"type": "object"},
+                "description": "New Tuesday schedule blocks",
+            },
+            "wednesday": {
+                "type": "array",
+                "items": {"type": "object"},
+                "description": "New Wednesday schedule blocks",
+            },
+            "thursday": {
+                "type": "array",
+                "items": {"type": "object"},
+                "description": "New Thursday schedule blocks",
+            },
+            "friday": {
+                "type": "array",
+                "items": {"type": "object"},
+                "description": "New Friday schedule blocks",
+            },
+            "saturday": {
+                "type": "array",
+                "items": {"type": "object"},
+                "description": "New Saturday schedule blocks",
+            },
+            "sunday": {
+                "type": "array",
+                "items": {"type": "object"},
+                "description": "New Sunday schedule blocks",
+            },
         },
         "required": ["entity_id"],
     },
@@ -853,4 +916,462 @@ async def delete_helper(hass: HomeAssistant, arguments: dict[str, Any]) -> dict[
         "deleted": entity_id,
         "domain": domain,
         "message": f"{domain} helper deleted",
+    }
+
+
+# =============================================================================
+# Template Helper Tools (Config Entry Flow API)
+# =============================================================================
+
+# Template sub-types available for creation
+TEMPLATE_TYPES = [
+    "alarm_control_panel", "binary_sensor", "button", "cover",
+    "event", "fan", "image", "light", "lock", "number",
+    "select", "sensor", "switch", "update", "vacuum", "weather",
+]
+
+
+@mcp_tool(
+    name="ha_list_template_helpers",
+    description=(
+        "List all template-based helpers (template sensors, binary sensors, "
+        "switches, etc.) that are created via Config Entry flows. These are "
+        "distinct from input_* helpers. Returns entry_id, title, template_type, "
+        "and configuration for each template helper."
+    ),
+    schema={
+        "type": "object",
+        "properties": {
+            "template_type": {
+                "type": "string",
+                "description": (
+                    "Filter by template sub-type (e.g., 'sensor', 'binary_sensor', "
+                    "'switch'). If omitted, returns all template helpers."
+                ),
+                "enum": TEMPLATE_TYPES,
+            },
+        },
+    },
+    permission="helpers_read",
+)
+async def list_template_helpers(
+    hass: HomeAssistant, arguments: dict[str, Any]
+) -> list[dict[str, Any]]:
+    """List all template-based helpers."""
+    type_filter = arguments.get("template_type")
+    entries = hass.config_entries.async_entries("template")
+
+    results = []
+    for entry in entries:
+        template_type = entry.options.get("template_type", "")
+        if type_filter and template_type != type_filter:
+            continue
+
+        results.append({
+            "entry_id": entry.entry_id,
+            "title": entry.title,
+            "domain": "template",
+            "template_type": template_type,
+            "state": entry.state.value if hasattr(entry.state, "value") else str(entry.state),
+            "options": dict(entry.options),
+        })
+
+    results.sort(key=lambda x: (x.get("template_type", ""), x.get("title", "").lower()))
+    return results
+
+
+@mcp_tool(
+    name="ha_get_template_helper",
+    description=(
+        "Get full details for a specific template-based helper by its config "
+        "entry ID. Returns the entry configuration, options, template type, "
+        "and current state."
+    ),
+    schema={
+        "type": "object",
+        "properties": {
+            "entry_id": {
+                "type": "string",
+                "description": (
+                    "The config entry ID of the template helper. "
+                    "Get this from ha_list_template_helpers."
+                ),
+            },
+        },
+        "required": ["entry_id"],
+    },
+    permission="helpers_read",
+)
+async def get_template_helper(
+    hass: HomeAssistant, arguments: dict[str, Any]
+) -> dict[str, Any]:
+    """Get a specific template-based helper by config entry ID."""
+    entry_id = arguments["entry_id"]
+
+    entry = hass.config_entries.async_get_entry(entry_id)
+    if entry is None:
+        raise ValueError(f"Config entry '{entry_id}' not found")
+
+    if entry.domain != "template":
+        raise ValueError(
+            f"Config entry '{entry_id}' is not a template helper "
+            f"(domain: {entry.domain})"
+        )
+
+    template_type = entry.options.get("template_type", "")
+
+    result: dict[str, Any] = {
+        "entry_id": entry.entry_id,
+        "title": entry.title,
+        "domain": "template",
+        "template_type": template_type,
+        "state": entry.state.value if hasattr(entry.state, "value") else str(entry.state),
+        "supports_options": entry.supports_options,
+        "supports_unload": entry.supports_unload,
+        "options": dict(entry.options),
+    }
+
+    # Find the entity associated with this config entry
+    entity_registry = er.async_get(hass)
+    entities = er.async_entries_for_config_entry(entity_registry, entry_id)
+    if entities:
+        entity_entries = []
+        for entity_entry in entities:
+            entity_data: dict[str, Any] = {
+                "entity_id": entity_entry.entity_id,
+                "name": entity_entry.name or entity_entry.original_name,
+                "area_id": entity_entry.area_id,
+                "disabled": entity_entry.disabled_by is not None,
+                "labels": list(entity_entry.labels) if entity_entry.labels else [],
+            }
+            # Add current state
+            state = hass.states.get(entity_entry.entity_id)
+            if state:
+                entity_data["current_state"] = {
+                    "state": state.state,
+                    "attributes": dict(state.attributes),
+                    "last_changed": state.last_changed.isoformat() if state.last_changed else None,
+                }
+            entity_entries.append(entity_data)
+        result["entities"] = entity_entries
+
+    return result
+
+
+@mcp_tool(
+    name="ha_create_template_helper",
+    description=(
+        "Create a template-based helper (template sensor, binary sensor, switch, "
+        "etc.) using Home Assistant's Config Entry Flow API. This is a 3-step "
+        "process handled automatically.\n\n"
+        "Common template_type values: sensor, binary_sensor, switch, number, "
+        "select, button, light, cover, fan, lock, vacuum, weather.\n\n"
+        "The 'state' field is a Jinja2 template string, e.g.:\n"
+        "  '{{ states(\"sensor.temperature\") }}'\n"
+        "  '{{ is_state(\"binary_sensor.door\", \"on\") }}'\n\n"
+        "IMPORTANT: Optional enum fields (device_class, state_class) must be "
+        "omitted entirely if not needed — empty strings cause validation errors."
+    ),
+    schema={
+        "type": "object",
+        "properties": {
+            "template_type": {
+                "type": "string",
+                "description": (
+                    "The type of template helper to create. Common values: "
+                    "sensor, binary_sensor, switch, number, select, button, "
+                    "light, cover, fan, lock, vacuum, weather"
+                ),
+                "enum": TEMPLATE_TYPES,
+            },
+            "name": {
+                "type": "string",
+                "description": "Human-readable name for the template helper (required)",
+            },
+            "state": {
+                "type": "string",
+                "description": (
+                    "Jinja2 template for the entity state (required). "
+                    "Example: '{{ states(\"sensor.time\") }}'"
+                ),
+            },
+            "unit_of_measurement": {
+                "type": "string",
+                "description": "Unit of measurement (sensor only, optional)",
+            },
+            "device_class": {
+                "type": "string",
+                "description": (
+                    "Device class for the entity (optional). Must be a valid "
+                    "value for the template_type — omit if not needed."
+                ),
+            },
+            "state_class": {
+                "type": "string",
+                "description": (
+                    "State class (sensor only, optional). Valid values: "
+                    "measurement, measurement_angle, total, total_increasing. "
+                    "Omit if not needed."
+                ),
+            },
+            "availability": {
+                "type": "string",
+                "description": (
+                    "Jinja2 template for availability (optional). "
+                    "Should evaluate to true/false."
+                ),
+            },
+            "device_id": {
+                "type": "string",
+                "description": "Device to associate the helper with (optional)",
+            },
+        },
+        "required": ["template_type", "name", "state"],
+    },
+    permission="helpers_create",
+)
+async def create_template_helper(
+    hass: HomeAssistant, arguments: dict[str, Any]
+) -> dict[str, Any]:
+    """Create a template-based helper via Config Entry Flow."""
+    template_type = arguments["template_type"]
+    name = arguments["name"]
+    state = arguments["state"]
+
+    # Step 1: Initiate the config entry flow
+    try:
+        result = await hass.config_entries.flow.async_init(
+            "template", context={"source": "user"}
+        )
+    except Exception as err:
+        raise ValueError(
+            f"Failed to initiate template config flow: {err}. "
+            f"Ensure the 'template' integration is loaded."
+        ) from err
+
+    flow_id = result["flow_id"]
+
+    # Step 2: Select the template sub-type
+    try:
+        result = await hass.config_entries.flow.async_configure(
+            flow_id, {"next_step_id": template_type}
+        )
+    except Exception as err:
+        raise ValueError(
+            f"Failed to select template type '{template_type}': {err}"
+        ) from err
+
+    # Step 3: Submit the configuration
+    config_data: dict[str, Any] = {
+        "name": name,
+        "state": state,
+    }
+
+    # Add optional fields only if provided (empty strings cause validation errors)
+    for field in ("unit_of_measurement", "device_class", "state_class",
+                  "availability", "device_id"):
+        if field in arguments and arguments[field]:
+            config_data[field] = arguments[field]
+
+    try:
+        result = await hass.config_entries.flow.async_configure(
+            flow_id, config_data
+        )
+    except Exception as err:
+        raise ValueError(
+            f"Failed to create template helper: {err}"
+        ) from err
+
+    if result.get("type") != "create_entry":
+        raise ValueError(
+            f"Unexpected flow result type: {result.get('type')}. "
+            f"Expected 'create_entry'. Result: {result}"
+        )
+
+    entry_result = result.get("result", {})
+    entry_id = (
+        entry_result.entry_id
+        if hasattr(entry_result, "entry_id")
+        else entry_result.get("entry_id")
+    )
+
+    return {
+        "entry_id": entry_id,
+        "title": result.get("title", name),
+        "domain": "template",
+        "template_type": template_type,
+        "options": result.get("options", config_data),
+        "message": f"Template {template_type} helper '{name}' created",
+    }
+
+
+@mcp_tool(
+    name="ha_update_template_helper",
+    description=(
+        "Update a template-based helper's configuration via the Options Flow API. "
+        "Use ha_list_template_helpers to find entry IDs and current options.\n\n"
+        "IMPORTANT: Optional enum fields (device_class, state_class) must be "
+        "omitted entirely if not needed — empty strings cause validation errors."
+    ),
+    schema={
+        "type": "object",
+        "properties": {
+            "entry_id": {
+                "type": "string",
+                "description": (
+                    "The config entry ID of the template helper to update. "
+                    "Get this from ha_list_template_helpers."
+                ),
+            },
+            "name": {
+                "type": "string",
+                "description": "New name for the template helper",
+            },
+            "state": {
+                "type": "string",
+                "description": (
+                    "New Jinja2 template for the entity state. "
+                    "Example: '{{ states(\"sensor.temperature\") }}'"
+                ),
+            },
+            "unit_of_measurement": {
+                "type": "string",
+                "description": "New unit of measurement (sensor only, optional)",
+            },
+            "device_class": {
+                "type": "string",
+                "description": "New device class (optional, omit to clear)",
+            },
+            "state_class": {
+                "type": "string",
+                "description": (
+                    "New state class (sensor only, optional). Valid values: "
+                    "measurement, measurement_angle, total, total_increasing"
+                ),
+            },
+            "availability": {
+                "type": "string",
+                "description": "New Jinja2 availability template (optional)",
+            },
+        },
+        "required": ["entry_id"],
+    },
+    permission="helpers_update",
+)
+async def update_template_helper(
+    hass: HomeAssistant, arguments: dict[str, Any]
+) -> dict[str, Any]:
+    """Update a template-based helper via Options Flow."""
+    entry_id = arguments["entry_id"]
+
+    # Verify the entry exists and is a template helper
+    entry = hass.config_entries.async_get_entry(entry_id)
+    if entry is None:
+        raise ValueError(f"Config entry '{entry_id}' not found")
+
+    if entry.domain != "template":
+        raise ValueError(
+            f"Config entry '{entry_id}' is not a template helper "
+            f"(domain: {entry.domain})"
+        )
+
+    if not entry.supports_options:
+        raise ValueError(
+            f"Template helper '{entry.title}' does not support options updates"
+        )
+
+    # Start the options flow
+    try:
+        result = await hass.config_entries.options.async_init(entry_id)
+    except Exception as err:
+        raise ValueError(
+            f"Failed to start options flow for '{entry.title}': {err}"
+        ) from err
+
+    flow_id = result["flow_id"]
+
+    # Build update data from current options merged with provided updates
+    current_options = dict(entry.options)
+    update_data: dict[str, Any] = {}
+
+    # Carry forward existing values, override with provided ones
+    for field in ("name", "state", "unit_of_measurement", "device_class",
+                  "state_class", "availability"):
+        if field in arguments:
+            # Only include non-empty values for enum fields
+            if arguments[field]:
+                update_data[field] = arguments[field]
+        elif field in current_options:
+            update_data[field] = current_options[field]
+
+    try:
+        result = await hass.config_entries.options.async_configure(
+            flow_id, update_data
+        )
+    except Exception as err:
+        raise ValueError(
+            f"Failed to update template helper: {err}"
+        ) from err
+
+    return {
+        "entry_id": entry_id,
+        "title": entry.title,
+        "domain": "template",
+        "template_type": entry.options.get("template_type", ""),
+        "options": update_data,
+        "message": f"Template helper '{entry.title}' updated",
+    }
+
+
+@mcp_tool(
+    name="ha_delete_template_helper",
+    description=(
+        "Delete a template-based helper by its config entry ID. Use "
+        "ha_list_template_helpers to find entry IDs. This action cannot be undone."
+    ),
+    schema={
+        "type": "object",
+        "properties": {
+            "entry_id": {
+                "type": "string",
+                "description": (
+                    "The config entry ID of the template helper to delete. "
+                    "Get this from ha_list_template_helpers."
+                ),
+            },
+        },
+        "required": ["entry_id"],
+    },
+    permission="helpers_delete",
+)
+async def delete_template_helper(
+    hass: HomeAssistant, arguments: dict[str, Any]
+) -> dict[str, Any]:
+    """Delete a template-based helper by config entry ID."""
+    entry_id = arguments["entry_id"]
+
+    # Verify the entry exists and is a template helper
+    entry = hass.config_entries.async_get_entry(entry_id)
+    if entry is None:
+        raise ValueError(f"Config entry '{entry_id}' not found")
+
+    if entry.domain != "template":
+        raise ValueError(
+            f"Config entry '{entry_id}' is not a template helper "
+            f"(domain: {entry.domain})"
+        )
+
+    title = entry.title
+
+    try:
+        result = await hass.config_entries.async_remove(entry_id)
+    except Exception as err:
+        raise ValueError(f"Failed to delete template helper: {err}") from err
+
+    return {
+        "deleted": entry_id,
+        "title": title,
+        "domain": "template",
+        "require_restart": result.get("require_restart", False),
+        "message": f"Template helper '{title}' deleted",
     }
