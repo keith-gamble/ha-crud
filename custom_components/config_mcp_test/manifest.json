@@ -1,7 +1,7 @@
 {
   "domain": "config_mcp_test",
   "name": "Configuration MCP Server (Test)",
-  "version": "1.4.1",
+  "version": "1.4.2",
   "documentation": "https://github.com/jeremiah-mitchell/hass-configuration-mcp",
   "issue_tracker": "https://github.com/jeremiah-mitchell/hass-configuration-mcp/issues",
   "dependencies": ["lovelace", "http"],
