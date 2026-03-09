@@ -93,6 +93,8 @@ from .views import (
     FloorListView,
     HelperDetailView,
     HelperListView,
+    TemplateHelperDetailView,
+    TemplateHelperListView,
     IntegrationDetailView,
     IntegrationListView,
     LabelDetailView,
@@ -498,5 +500,7 @@ def _register_views(hass: HomeAssistant, options: dict[str, Any]) -> None:
     if helpers_enabled and RESOURCE_HELPERS not in _REGISTERED_VIEWS:
         hass.http.register_view(HelperListView())
         hass.http.register_view(HelperDetailView())
+        hass.http.register_view(TemplateHelperListView())
+        hass.http.register_view(TemplateHelperDetailView())
         _REGISTERED_VIEWS.add(RESOURCE_HELPERS)
-        _LOGGER.info("Registered helper API endpoints at /api/config_mcp/helpers")
+        _LOGGER.info("Registered helper API endpoints at /api/config_mcp/helpers and /api/config_mcp/template_helpers")

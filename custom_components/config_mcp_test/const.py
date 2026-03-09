@@ -105,15 +105,17 @@ DISCOVERY_RESOURCES = [
     RESOURCE_SERVICES,
 ]
 
-# Helper domains (input_* helpers and utility helpers)
+# Helper domains (StorageCollection-based helpers with WebSocket CRUD)
 HELPER_DOMAINS = [
     "input_boolean",
+    "input_button",
     "input_number",
     "input_text",
     "input_select",
     "input_datetime",
     "counter",
     "timer",
+    "schedule",
 ]
 
 # MCP Server configuration key
@@ -187,6 +189,7 @@ API_BASE_PATH_AUTOMATIONS = "/api/config_mcp/automations"
 API_BASE_PATH_SCENES = "/api/config_mcp/scenes"
 API_BASE_PATH_SCRIPTS = "/api/config_mcp/scripts"
 API_BASE_PATH_HELPERS = "/api/config_mcp/helpers"
+API_BASE_PATH_TEMPLATE_HELPERS = "/api/config_mcp/template_helpers"
 
 # Discovery API paths (read-only)
 API_BASE_PATH_ENTITIES = "/api/config_mcp/entities"
