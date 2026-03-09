@@ -79,8 +79,8 @@ async def _get_helpers_for_domain(hass: HomeAssistant, domain: str) -> list[dict
     # Prefer the StorageCollection's in-memory data so changes are visible
     # immediately without waiting for the 10-second save delay.
     try:
-        collection = _get_storage_collection(hass, domain)
-        for item in collection.values():
+        storage_collection = _get_storage_collection(hass, domain)
+        for item in storage_collection.data.values():
             if isinstance(item, dict):
                 helpers.append({
                     "id": item.get("id"),
@@ -89,7 +89,7 @@ async def _get_helpers_for_domain(hass: HomeAssistant, domain: str) -> list[dict
                     **{k: v for k, v in item.items() if k not in ("id", "name")},
                 })
         return helpers
-    except ValueError:
+    except (ValueError, AttributeError):
         pass  # Fall through to Store-based read
 
     # Fallback: read from .storage/{domain} on disk
