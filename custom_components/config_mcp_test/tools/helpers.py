@@ -18,7 +18,9 @@ from homeassistant.helpers import entity_registry as er
 from homeassistant.helpers.storage import Store
 
 from ..mcp_registry import mcp_tool
-from ..const import HELPER_DOMAINS
+import voluptuous as vol
+
+from ..const import CONFIG_ENTRY_HELPER_DOMAINS, HELPER_DOMAINS
 
 _LOGGER = logging.getLogger(__name__)
 
@@ -920,72 +922,237 @@ async def delete_helper(hass: HomeAssistant, arguments: dict[str, Any]) -> dict[
 
 
 # =============================================================================
-# Template Helper Tools (Config Entry Flow API)
+# Config Entry Helper Tools (Config Entry Flow API)
+# =============================================================================
+# These helpers use HA's Config Entry Flow for creation/management, unlike
+# StorageCollection helpers (input_boolean, counter, etc.). Includes template
+# sensors, groups, utility meters, derivatives, thermostats, and more.
+#
+# The flow follower dynamically inspects each flow step's voluptuous schema
+# and submits matching fields from the user's config dict, making it work
+# with any current or future config-entry-flow helper integration.
+
+# Domains that present a menu step requiring sub_type selection
+MENU_FLOW_DOMAINS = {"group", "template", "random"}
+
+
+def _extract_form_data(schema, config_data):
+    """Extract fields from config_data that match a voluptuous schema."""
+    if schema is None:
+        return {}
+
+    submit_data = {}
+    for key in schema.schema:
+        if isinstance(key, vol.Marker):
+            field_name = key.schema
+        else:
+            field_name = str(key)
+
+        if field_name in config_data:
+            submit_data[field_name] = config_data[field_name]
+
+    return submit_data
+
+
+async def _follow_config_flow(hass, domain, config_data, sub_type=None):
+    """Follow a config entry flow to create a helper, submitting matching fields.
+
+    Handles all flow patterns automatically:
+    - Direct form: init -> form -> create_entry
+    - Multi-step form: init -> form -> form -> ... -> create_entry
+    - Menu-first: init -> menu -> form -> create_entry
+    """
+    try:
+        result = await hass.config_entries.flow.async_init(
+            domain, context={"source": "user"}
+        )
+    except Exception as err:
+        raise ValueError(
+            f"Failed to initiate config flow for '{domain}': {err}. "
+            f"Ensure the '{domain}' integration is loaded."
+        ) from err
+
+    flow_id = result["flow_id"]
+
+    for _ in range(10):  # safety limit for multi-step flows
+        flow_type = result.get("type")
+
+        if flow_type == "create_entry":
+            return result
+
+        if flow_type == "abort":
+            raise ValueError(
+                f"Config flow aborted: {result.get('reason', 'unknown')}"
+            )
+
+        if flow_type == "menu":
+            if not sub_type:
+                menu_options = result.get("menu_options", [])
+                raise ValueError(
+                    f"Domain '{domain}' requires sub_type. "
+                    f"Available: {', '.join(menu_options)}"
+                )
+            result = await hass.config_entries.flow.async_configure(
+                flow_id, {"next_step_id": sub_type}
+            )
+            sub_type = None  # Only use for first menu
+            continue
+
+        if flow_type == "form":
+            schema = result.get("data_schema")
+            submit_data = _extract_form_data(schema, config_data)
+            try:
+                result = await hass.config_entries.flow.async_configure(
+                    flow_id, submit_data
+                )
+            except Exception as err:
+                step_id = result.get("step_id", "unknown")
+                raise ValueError(
+                    f"Failed at flow step '{step_id}': {err}"
+                ) from err
+            continue
+
+        raise ValueError(f"Unexpected flow step type: {flow_type}")
+
+    raise ValueError("Config flow did not complete within expected steps")
+
+
+async def _follow_options_flow(hass, entry_id, update_data):
+    """Follow an options flow, merging current options with updates."""
+    entry = hass.config_entries.async_get_entry(entry_id)
+    if entry is None:
+        raise ValueError(f"Config entry '{entry_id}' not found")
+
+    merged = {**dict(entry.options), **update_data}
+
+    try:
+        result = await hass.config_entries.options.async_init(entry_id)
+    except Exception as err:
+        raise ValueError(
+            f"Failed to start options flow for '{entry.title}': {err}"
+        ) from err
+
+    flow_id = result["flow_id"]
+
+    for _ in range(10):
+        flow_type = result.get("type")
+
+        if flow_type == "create_entry":
+            return result
+
+        if flow_type == "abort":
+            raise ValueError(
+                f"Options flow aborted: {result.get('reason', 'unknown')}"
+            )
+
+        if flow_type == "form":
+            schema = result.get("data_schema")
+            submit_data = _extract_form_data(schema, merged)
+            try:
+                result = await hass.config_entries.options.async_configure(
+                    flow_id, submit_data
+                )
+            except Exception as err:
+                step_id = result.get("step_id", "unknown")
+                raise ValueError(
+                    f"Failed at options step '{step_id}': {err}"
+                ) from err
+            continue
+
+        raise ValueError(f"Unexpected options flow type: {flow_type}")
+
+    raise ValueError("Options flow did not complete within expected steps")
+
+
+# =============================================================================
+# List Config Entry Helpers
 # =============================================================================
 
-# Template sub-types available for creation
-TEMPLATE_TYPES = [
-    "alarm_control_panel", "binary_sensor", "button", "cover",
-    "event", "fan", "image", "light", "lock", "number",
-    "select", "sensor", "switch", "update", "vacuum", "weather",
-]
-
-
 @mcp_tool(
-    name="ha_list_template_helpers",
+    name="ha_list_config_entry_helpers",
     description=(
-        "List all template-based helpers (template sensors, binary sensors, "
-        "switches, etc.) that are created via Config Entry flows. These are "
-        "distinct from input_* helpers. Returns entry_id, title, template_type, "
-        "and configuration for each template helper."
+        "List config-entry-flow-based helpers (template sensors, groups, utility "
+        "meters, derivatives, thermostats, etc.). These are distinct from "
+        "StorageCollection helpers (input_boolean, counter, timer, etc.).\n\n"
+        "Optionally filter by domain and/or sub_type. Returns entry_id, title, "
+        "domain, state, and configuration for each helper."
     ),
     schema={
         "type": "object",
         "properties": {
-            "template_type": {
+            "domain": {
                 "type": "string",
                 "description": (
-                    "Filter by template sub-type (e.g., 'sensor', 'binary_sensor', "
-                    "'switch'). If omitted, returns all template helpers."
+                    "Filter by integration domain. If omitted, lists helpers "
+                    "from all config-entry-flow domains."
                 ),
-                "enum": TEMPLATE_TYPES,
+                "enum": CONFIG_ENTRY_HELPER_DOMAINS,
+            },
+            "sub_type": {
+                "type": "string",
+                "description": (
+                    "Filter by sub-type within a domain (e.g., 'sensor' for "
+                    "template sensors, 'light' for light groups)"
+                ),
             },
         },
     },
     permission="helpers_read",
 )
-async def list_template_helpers(
+async def list_config_entry_helpers(
     hass: HomeAssistant, arguments: dict[str, Any]
 ) -> list[dict[str, Any]]:
-    """List all template-based helpers."""
-    type_filter = arguments.get("template_type")
-    entries = hass.config_entries.async_entries("template")
+    """List all config-entry-flow-based helpers."""
+    domain_filter = arguments.get("domain")
+    sub_type_filter = arguments.get("sub_type")
+
+    domains = [domain_filter] if domain_filter else CONFIG_ENTRY_HELPER_DOMAINS
 
     results = []
-    for entry in entries:
-        template_type = entry.options.get("template_type", "")
-        if type_filter and template_type != type_filter:
+    for domain in domains:
+        try:
+            entries = hass.config_entries.async_entries(domain)
+        except Exception:
             continue
 
-        results.append({
-            "entry_id": entry.entry_id,
-            "title": entry.title,
-            "domain": "template",
-            "template_type": template_type,
-            "state": entry.state.value if hasattr(entry.state, "value") else str(entry.state),
-            "options": dict(entry.options),
-        })
+        for entry in entries:
+            if sub_type_filter:
+                entry_options = entry.options or {}
+                entry_sub_type = (
+                    entry_options.get("template_type")
+                    or entry_options.get("group_type")
+                    or entry_options.get("type")
+                    or ""
+                )
+                if entry_sub_type != sub_type_filter:
+                    continue
 
-    results.sort(key=lambda x: (x.get("template_type", ""), x.get("title", "").lower()))
+            results.append({
+                "entry_id": entry.entry_id,
+                "title": entry.title,
+                "domain": entry.domain,
+                "state": (
+                    entry.state.value
+                    if hasattr(entry.state, "value")
+                    else str(entry.state)
+                ),
+                "options": dict(entry.options) if entry.options else {},
+            })
+
+    results.sort(key=lambda x: (x["domain"], x.get("title", "").lower()))
     return results
 
 
+# =============================================================================
+# Get Config Entry Helper
+# =============================================================================
+
 @mcp_tool(
-    name="ha_get_template_helper",
+    name="ha_get_config_entry_helper",
     description=(
-        "Get full details for a specific template-based helper by its config "
-        "entry ID. Returns the entry configuration, options, template type, "
-        "and current state."
+        "Get full details for a specific config-entry-flow helper by its config "
+        "entry ID. Returns configuration, options, associated entities, and "
+        "current state."
     ),
     schema={
         "type": "object",
@@ -993,8 +1160,8 @@ async def list_template_helpers(
             "entry_id": {
                 "type": "string",
                 "description": (
-                    "The config entry ID of the template helper. "
-                    "Get this from ha_list_template_helpers."
+                    "The config entry ID. Get this from "
+                    "ha_list_config_entry_helpers."
                 ),
             },
         },
@@ -1002,36 +1169,37 @@ async def list_template_helpers(
     },
     permission="helpers_read",
 )
-async def get_template_helper(
+async def get_config_entry_helper(
     hass: HomeAssistant, arguments: dict[str, Any]
 ) -> dict[str, Any]:
-    """Get a specific template-based helper by config entry ID."""
+    """Get a specific config-entry-flow helper."""
     entry_id = arguments["entry_id"]
 
     entry = hass.config_entries.async_get_entry(entry_id)
     if entry is None:
         raise ValueError(f"Config entry '{entry_id}' not found")
 
-    if entry.domain != "template":
+    if entry.domain not in CONFIG_ENTRY_HELPER_DOMAINS:
         raise ValueError(
-            f"Config entry '{entry_id}' is not a template helper "
+            f"Config entry '{entry_id}' is not a config-entry helper "
             f"(domain: {entry.domain})"
         )
-
-    template_type = entry.options.get("template_type", "")
 
     result: dict[str, Any] = {
         "entry_id": entry.entry_id,
         "title": entry.title,
-        "domain": "template",
-        "template_type": template_type,
-        "state": entry.state.value if hasattr(entry.state, "value") else str(entry.state),
+        "domain": entry.domain,
+        "state": (
+            entry.state.value
+            if hasattr(entry.state, "value")
+            else str(entry.state)
+        ),
         "supports_options": entry.supports_options,
         "supports_unload": entry.supports_unload,
-        "options": dict(entry.options),
+        "options": dict(entry.options) if entry.options else {},
     }
 
-    # Find the entity associated with this config entry
+    # Find associated entities
     entity_registry = er.async_get(hass)
     entities = er.async_entries_for_config_entry(entity_registry, entry_id)
     if entities:
@@ -1042,15 +1210,20 @@ async def get_template_helper(
                 "name": entity_entry.name or entity_entry.original_name,
                 "area_id": entity_entry.area_id,
                 "disabled": entity_entry.disabled_by is not None,
-                "labels": list(entity_entry.labels) if entity_entry.labels else [],
+                "labels": (
+                    list(entity_entry.labels) if entity_entry.labels else []
+                ),
             }
-            # Add current state
             state = hass.states.get(entity_entry.entity_id)
             if state:
                 entity_data["current_state"] = {
                     "state": state.state,
                     "attributes": dict(state.attributes),
-                    "last_changed": state.last_changed.isoformat() if state.last_changed else None,
+                    "last_changed": (
+                        state.last_changed.isoformat()
+                        if state.last_changed
+                        else None
+                    ),
                 }
             entity_entries.append(entity_data)
         result["entities"] = entity_entries
@@ -1058,160 +1231,150 @@ async def get_template_helper(
     return result
 
 
+# =============================================================================
+# Create Config Entry Helper
+# =============================================================================
+
+_CREATE_DESCRIPTION = (
+    "Create a config-entry-flow helper. The flow is followed automatically - "
+    "just provide domain, config fields, and sub_type if needed.\n\n"
+    "For menu-based domains (group, template, random), sub_type is required.\n\n"
+    "DOMAIN REFERENCE (* = required):\n\n"
+    "DIRECT FORM DOMAINS:\n"
+    "- derivative: name*, source* (entity_id), round_digits, "
+    "time_window (dict {hours/minutes/seconds}), unit_prefix (n|u|m|k|M|G|T|P), "
+    "unit_time (s|min|h|d)\n"
+    "- generic_hygrostat: name*, device_class* (humidifier|dehumidifier), "
+    "sensor* (humidity entity_id), humidifier* (switch/fan entity_id), "
+    "dry_tolerance*, wet_tolerance*\n"
+    "- integration: name*, source_sensor* (entity_id), "
+    "method (trapezoidal|left|right), round_digits, unit_prefix (k|M|G|T), "
+    "unit_time (s|min|h|d)\n"
+    "- min_max: name*, entity_ids* (list of entity_ids), "
+    "type* (min|max|mean|median|last|range|sum), round_digits\n"
+    "- mold_indicator: name*, indoor_temp* (entity_id), "
+    "indoor_humidity* (entity_id), outdoor_temp* (entity_id), "
+    "calibration_factor*\n"
+    "- switch_as_x: entity_id* (switch entity), "
+    "target_domain* (cover|fan|light|lock|siren|valve), invert\n"
+    "- threshold: name*, entity_id* (sensor), lower and/or upper "
+    "(at least one required), hysteresis\n"
+    "- tod: name*, after_time* (HH:MM:SS), before_time* (HH:MM:SS)\n"
+    "- utility_meter: name*, source_sensor* (entity_id), "
+    "meter_type* (none|quarter-hourly|hourly|daily|weekly|monthly|"
+    "bimonthly|quarterly|yearly), tariffs (list), net_consumption, "
+    "delta_values, periodically_resetting\n\n"
+    "MULTI-STEP FORM DOMAINS:\n"
+    "- filter: name*, entity_id*, filter_name* (lowpass|outlier|range|"
+    "throttle|time_sma|time_throttle), filter_window_size, filter_radius, "
+    "filter_precision\n"
+    "- generic_thermostat: name*, ac_mode* (bool), sensor* (temp entity_id), "
+    "heater* (switch/fan entity_id), cold_tolerance*, hot_tolerance*, "
+    "min_temp, max_temp\n"
+    "- history_stats: name*, entity_id*, type* (time|ratio|count), "
+    "state* (list of state strings)\n"
+    "- statistics: name*, entity_id*, state_characteristic* "
+    "(average_linear|count|mean|median|standard_deviation|sum|value_max|"
+    "value_min|variance|etc.)\n"
+    "- trend: name*, entity_id* (sensor), attribute, invert, max_samples, "
+    "min_samples, min_gradient, sample_duration\n\n"
+    "MENU DOMAINS (sub_type required):\n"
+    "- group: sub_type* (binary_sensor|cover|fan|light|lock|media_player|"
+    "sensor|switch|etc.), name*, entities* (list), hide_members, "
+    "all (bool, for binary_sensor/light/switch), "
+    "type (sensor: min|max|mean|median|sum)\n"
+    "- random: sub_type* (binary_sensor|sensor), name*, minimum, maximum, "
+    "device_class\n"
+    "- template: sub_type* (sensor|binary_sensor|switch|number|select|"
+    "button|cover|fan|light|lock|etc.), name*, state* (Jinja2), "
+    "unit_of_measurement, device_class, state_class, availability"
+)
+
+
 @mcp_tool(
-    name="ha_create_template_helper",
-    description=(
-        "Create a template-based helper (template sensor, binary sensor, switch, "
-        "etc.) using Home Assistant's Config Entry Flow API. This is a 3-step "
-        "process handled automatically.\n\n"
-        "Common template_type values: sensor, binary_sensor, switch, number, "
-        "select, button, light, cover, fan, lock, vacuum, weather.\n\n"
-        "The 'state' field is a Jinja2 template string, e.g.:\n"
-        "  '{{ states(\"sensor.temperature\") }}'\n"
-        "  '{{ is_state(\"binary_sensor.door\", \"on\") }}'\n\n"
-        "IMPORTANT: Optional enum fields (device_class, state_class) must be "
-        "omitted entirely if not needed — empty strings cause validation errors."
-    ),
+    name="ha_create_config_entry_helper",
+    description=_CREATE_DESCRIPTION,
     schema={
         "type": "object",
         "properties": {
-            "template_type": {
+            "domain": {
+                "type": "string",
+                "description": "The helper integration domain",
+                "enum": CONFIG_ENTRY_HELPER_DOMAINS,
+            },
+            "sub_type": {
                 "type": "string",
                 "description": (
-                    "The type of template helper to create. Common values: "
-                    "sensor, binary_sensor, switch, number, select, button, "
-                    "light, cover, fan, lock, vacuum, weather"
+                    "Sub-type for menu domains. Required for group "
+                    "(binary_sensor, cover, fan, light, lock, media_player, "
+                    "sensor, switch), template (sensor, binary_sensor, switch, "
+                    "number, etc.), and random (binary_sensor, sensor)."
                 ),
-                "enum": TEMPLATE_TYPES,
             },
-            "name": {
-                "type": "string",
-                "description": "Human-readable name for the template helper (required)",
-            },
-            "state": {
-                "type": "string",
+            "config": {
+                "type": "object",
                 "description": (
-                    "Jinja2 template for the entity state (required). "
-                    "Example: '{{ states(\"sensor.time\") }}'"
+                    "Configuration fields as key-value pairs. Required and "
+                    "optional fields depend on the domain - see tool description."
                 ),
-            },
-            "unit_of_measurement": {
-                "type": "string",
-                "description": "Unit of measurement (sensor only, optional)",
-            },
-            "device_class": {
-                "type": "string",
-                "description": (
-                    "Device class for the entity (optional). Must be a valid "
-                    "value for the template_type — omit if not needed."
-                ),
-            },
-            "state_class": {
-                "type": "string",
-                "description": (
-                    "State class (sensor only, optional). Valid values: "
-                    "measurement, measurement_angle, total, total_increasing. "
-                    "Omit if not needed."
-                ),
-            },
-            "availability": {
-                "type": "string",
-                "description": (
-                    "Jinja2 template for availability (optional). "
-                    "Should evaluate to true/false."
-                ),
-            },
-            "device_id": {
-                "type": "string",
-                "description": "Device to associate the helper with (optional)",
             },
         },
-        "required": ["template_type", "name", "state"],
+        "required": ["domain", "config"],
     },
     permission="helpers_create",
 )
-async def create_template_helper(
+async def create_config_entry_helper(
     hass: HomeAssistant, arguments: dict[str, Any]
 ) -> dict[str, Any]:
-    """Create a template-based helper via Config Entry Flow."""
-    template_type = arguments["template_type"]
-    name = arguments["name"]
-    state = arguments["state"]
+    """Create a config-entry-flow helper."""
+    domain = arguments["domain"]
+    sub_type = arguments.get("sub_type")
+    config_data = arguments.get("config", {})
 
-    # Step 1: Initiate the config entry flow
-    try:
-        result = await hass.config_entries.flow.async_init(
-            "template", context={"source": "user"}
-        )
-    except Exception as err:
+    if domain not in CONFIG_ENTRY_HELPER_DOMAINS:
         raise ValueError(
-            f"Failed to initiate template config flow: {err}. "
-            f"Ensure the 'template' integration is loaded."
-        ) from err
-
-    flow_id = result["flow_id"]
-
-    # Step 2: Select the template sub-type
-    try:
-        result = await hass.config_entries.flow.async_configure(
-            flow_id, {"next_step_id": template_type}
+            f"Invalid domain '{domain}'. Valid domains: "
+            f"{', '.join(CONFIG_ENTRY_HELPER_DOMAINS)}"
         )
-    except Exception as err:
+
+    if domain in MENU_FLOW_DOMAINS and not sub_type:
         raise ValueError(
-            f"Failed to select template type '{template_type}': {err}"
-        ) from err
-
-    # Step 3: Submit the configuration
-    config_data: dict[str, Any] = {
-        "name": name,
-        "state": state,
-    }
-
-    # Add optional fields only if provided (empty strings cause validation errors)
-    for field in ("unit_of_measurement", "device_class", "state_class",
-                  "availability", "device_id"):
-        if field in arguments and arguments[field]:
-            config_data[field] = arguments[field]
-
-    try:
-        result = await hass.config_entries.flow.async_configure(
-            flow_id, config_data
+            f"Domain '{domain}' requires sub_type parameter"
         )
-    except Exception as err:
-        raise ValueError(
-            f"Failed to create template helper: {err}"
-        ) from err
 
-    if result.get("type") != "create_entry":
-        raise ValueError(
-            f"Unexpected flow result type: {result.get('type')}. "
-            f"Expected 'create_entry'. Result: {result}"
-        )
+    result = await _follow_config_flow(hass, domain, config_data, sub_type)
 
     entry_result = result.get("result", {})
     entry_id = (
         entry_result.entry_id
         if hasattr(entry_result, "entry_id")
-        else entry_result.get("entry_id")
+        else entry_result.get("entry_id") if isinstance(entry_result, dict)
+        else str(entry_result)
     )
 
     return {
         "entry_id": entry_id,
-        "title": result.get("title", name),
-        "domain": "template",
-        "template_type": template_type,
+        "title": result.get("title", config_data.get("name", "")),
+        "domain": domain,
+        "sub_type": sub_type,
         "options": result.get("options", config_data),
-        "message": f"Template {template_type} helper '{name}' created",
+        "message": f"{domain} helper created",
     }
 
 
+# =============================================================================
+# Update Config Entry Helper
+# =============================================================================
+
 @mcp_tool(
-    name="ha_update_template_helper",
+    name="ha_update_config_entry_helper",
     description=(
-        "Update a template-based helper's configuration via the Options Flow API. "
-        "Use ha_list_template_helpers to find entry IDs and current options.\n\n"
+        "Update a config-entry-flow helper via its Options Flow. Provide the "
+        "entry_id and the fields to update. Current options are merged with "
+        "updates automatically.\n\n"
+        "Use ha_list_config_entry_helpers to find entry IDs and current options.\n\n"
         "IMPORTANT: Optional enum fields (device_class, state_class) must be "
-        "omitted entirely if not needed — empty strings cause validation errors."
+        "omitted entirely if not needed - empty strings may cause validation errors."
     ),
     schema={
         "type": "object",
@@ -1219,115 +1382,73 @@ async def create_template_helper(
             "entry_id": {
                 "type": "string",
                 "description": (
-                    "The config entry ID of the template helper to update. "
-                    "Get this from ha_list_template_helpers."
+                    "The config entry ID to update. Get this from "
+                    "ha_list_config_entry_helpers."
                 ),
             },
-            "name": {
-                "type": "string",
-                "description": "New name for the template helper",
-            },
-            "state": {
-                "type": "string",
+            "updates": {
+                "type": "object",
                 "description": (
-                    "New Jinja2 template for the entity state. "
-                    "Example: '{{ states(\"sensor.temperature\") }}'"
+                    "Fields to update as key-value pairs. Only provided fields "
+                    "are changed; existing options are preserved."
                 ),
-            },
-            "unit_of_measurement": {
-                "type": "string",
-                "description": "New unit of measurement (sensor only, optional)",
-            },
-            "device_class": {
-                "type": "string",
-                "description": "New device class (optional, omit to clear)",
-            },
-            "state_class": {
-                "type": "string",
-                "description": (
-                    "New state class (sensor only, optional). Valid values: "
-                    "measurement, measurement_angle, total, total_increasing"
-                ),
-            },
-            "availability": {
-                "type": "string",
-                "description": "New Jinja2 availability template (optional)",
             },
         },
-        "required": ["entry_id"],
+        "required": ["entry_id", "updates"],
     },
     permission="helpers_update",
 )
-async def update_template_helper(
+async def update_config_entry_helper(
     hass: HomeAssistant, arguments: dict[str, Any]
 ) -> dict[str, Any]:
-    """Update a template-based helper via Options Flow."""
+    """Update a config-entry-flow helper via Options Flow."""
     entry_id = arguments["entry_id"]
+    updates = arguments.get("updates", {})
 
-    # Verify the entry exists and is a template helper
     entry = hass.config_entries.async_get_entry(entry_id)
     if entry is None:
         raise ValueError(f"Config entry '{entry_id}' not found")
 
-    if entry.domain != "template":
+    if entry.domain not in CONFIG_ENTRY_HELPER_DOMAINS:
         raise ValueError(
-            f"Config entry '{entry_id}' is not a template helper "
+            f"Config entry '{entry_id}' is not a config-entry helper "
             f"(domain: {entry.domain})"
         )
 
     if not entry.supports_options:
         raise ValueError(
-            f"Template helper '{entry.title}' does not support options updates"
+            f"Helper '{entry.title}' ({entry.domain}) does not support "
+            f"options updates"
         )
 
-    # Start the options flow
-    try:
-        result = await hass.config_entries.options.async_init(entry_id)
-    except Exception as err:
-        raise ValueError(
-            f"Failed to start options flow for '{entry.title}': {err}"
-        ) from err
+    if not updates:
+        raise ValueError("No update fields provided")
 
-    flow_id = result["flow_id"]
+    # Remove empty string values that could cause enum validation errors
+    clean_updates = {
+        k: v for k, v in updates.items() if v is not None and v != ""
+    }
 
-    # Build update data from current options merged with provided updates
-    current_options = dict(entry.options)
-    update_data: dict[str, Any] = {}
-
-    # Carry forward existing values, override with provided ones
-    for field in ("name", "state", "unit_of_measurement", "device_class",
-                  "state_class", "availability"):
-        if field in arguments:
-            # Only include non-empty values for enum fields
-            if arguments[field]:
-                update_data[field] = arguments[field]
-        elif field in current_options:
-            update_data[field] = current_options[field]
-
-    try:
-        result = await hass.config_entries.options.async_configure(
-            flow_id, update_data
-        )
-    except Exception as err:
-        raise ValueError(
-            f"Failed to update template helper: {err}"
-        ) from err
+    await _follow_options_flow(hass, entry_id, clean_updates)
 
     return {
         "entry_id": entry_id,
         "title": entry.title,
-        "domain": "template",
-        "template_type": entry.options.get("template_type", ""),
-        "options": update_data,
-        "message": f"Template helper '{entry.title}' updated",
+        "domain": entry.domain,
+        "updates": clean_updates,
+        "message": f"{entry.domain} helper '{entry.title}' updated",
     }
 
 
+# =============================================================================
+# Delete Config Entry Helper
+# =============================================================================
+
 @mcp_tool(
-    name="ha_delete_template_helper",
+    name="ha_delete_config_entry_helper",
     description=(
-        "Delete a template-based helper by its config entry ID. Use "
-        "ha_list_template_helpers to find entry IDs. This action cannot be undone."
+        "Delete a config-entry-flow helper by its config entry ID. This action "
+        "cannot be undone. Use ha_list_config_entry_helpers to find entry IDs."
     ),
     schema={
         "type": "object",
@@ -1335,8 +1456,8 @@ async def update_template_helper(
             "entry_id": {
                 "type": "string",
                 "description": (
-                    "The config entry ID of the template helper to delete. "
-                    "Get this from ha_list_template_helpers."
+                    "The config entry ID to delete. Get this from "
+                    "ha_list_config_entry_helpers."
                 ),
             },
         },
@@ -1344,34 +1465,34 @@ async def update_template_helper(
     },
     permission="helpers_delete",
 )
-async def delete_template_helper(
+async def delete_config_entry_helper(
     hass: HomeAssistant, arguments: dict[str, Any]
 ) -> dict[str, Any]:
-    """Delete a template-based helper by config entry ID."""
+    """Delete a config-entry-flow helper."""
     entry_id = arguments["entry_id"]
 
-    # Verify the entry exists and is a template helper
     entry = hass.config_entries.async_get_entry(entry_id)
     if entry is None:
         raise ValueError(f"Config entry '{entry_id}' not found")
 
-    if entry.domain != "template":
+    if entry.domain not in CONFIG_ENTRY_HELPER_DOMAINS:
         raise ValueError(
-            f"Config entry '{entry_id}' is not a template helper "
+            f"Config entry '{entry_id}' is not a config-entry helper "
             f"(domain: {entry.domain})"
         )
 
     title = entry.title
+    domain = entry.domain
 
     try:
         result = await hass.config_entries.async_remove(entry_id)
     except Exception as err:
-        raise ValueError(f"Failed to delete template helper: {err}") from err
+        raise ValueError(f"Failed to delete helper: {err}") from err
 
     return {
         "deleted": entry_id,
         "title": title,
-        "domain": "template",
+        "domain": domain,
         "require_restart": result.get("require_restart", False),
-        "message": f"Template helper '{title}' deleted",
+        "message": f"{domain} helper '{title}' deleted",
     }

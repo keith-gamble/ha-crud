@@ -16,7 +16,7 @@ from homeassistant.helpers import entity_registry as er
 
 from ..const import (
     API_BASE_PATH_HELPERS,
-    API_BASE_PATH_TEMPLATE_HELPERS,
+    API_BASE_PATH_CONFIG_ENTRY_HELPERS,
     CONF_HELPERS_CREATE,
     CONF_HELPERS_DELETE,
     CONF_HELPERS_READ,
@@ -28,6 +28,13 @@ from ..const import (
     ERR_HELPER_NOT_FOUND,
     ERR_INVALID_CONFIG,
     HELPER_DOMAINS,
+    CONFIG_ENTRY_HELPER_DOMAINS,
+)
+
+from ..tools.helpers import (
+    _follow_config_flow,
+    _follow_options_flow,
+    _extract_form_data,
 )
 
 _LOGGER = logging.getLogger(__name__)
@@ -651,29 +658,22 @@ class HelperDetailView(HomeAssistantView):
         return web.Response(status=HTTPStatus.NO_CONTENT)
 
 
-# Template sub-types available for creation
-TEMPLATE_TYPES = [
-    "alarm_control_panel", "binary_sensor", "button", "cover",
-    "event", "fan", "image", "light", "lock", "number",
-    "select", "sensor", "switch", "update", "vacuum", "weather",
-]
+class ConfigEntryHelperListView(HomeAssistantView):
+    """View to list and create config-entry-flow helpers."""
 
-
-class TemplateHelperListView(HomeAssistantView):
-    """View to list and create template-based helpers."""
-
-    url = API_BASE_PATH_TEMPLATE_HELPERS
-    name = "api:config_mcp:template_helpers"
+    url = API_BASE_PATH_CONFIG_ENTRY_HELPERS
+    name = "api:config_mcp:config_entry_helpers"
     requires_auth = True
 
     async def get(self, request: web.Request) -> web.Response:
-        """Handle GET request - list all template helpers.
+        """Handle GET request - list config entry helpers.
 
         Query params:
-            template_type: Optional filter (e.g., 'sensor', 'binary_sensor')
+            domain: Optional filter by integration domain
+            sub_type: Optional filter by sub-type
 
         Returns:
-            200: JSON array of template helper data
+            200: JSON array of helper data
             403: Permission denied
         """
         hass: HomeAssistant = request.app["hass"]
@@ -684,43 +684,66 @@ class TemplateHelperListView(HomeAssistantView):
                 HTTPStatus.FORBIDDEN,
             )
 
-        type_filter = request.query.get("template_type")
-        entries = hass.config_entries.async_entries("template")
+        domain_filter = request.query.get("domain")
+        sub_type_filter = request.query.get("sub_type")
+
+        domains = (
+            [domain_filter] if domain_filter
+            else CONFIG_ENTRY_HELPER_DOMAINS
+        )
 
         results = []
-        for entry in entries:
-            template_type = entry.options.get("template_type", "")
-            if type_filter and template_type != type_filter:
+        for domain in domains:
+            try:
+                entries = hass.config_entries.async_entries(domain)
+            except Exception:
                 continue
 
-            results.append({
-                "entry_id": entry.entry_id,
-                "title": entry.title,
-                "domain": "template",
-                "template_type": template_type,
-                "state": entry.state.value if hasattr(entry.state, "value") else str(entry.state),
-                "options": dict(entry.options),
-            })
+            for entry in entries:
+                if sub_type_filter:
+                    entry_options = entry.options or {}
+                    entry_sub_type = (
+                        entry_options.get("template_type")
+                        or entry_options.get("group_type")
+                        or entry_options.get("type")
+                        or ""
+                    )
+                    if entry_sub_type != sub_type_filter:
+                        continue
 
-        results.sort(key=lambda x: (x.get("template_type", ""), x.get("title", "").lower()))
+                results.append({
+                    "entry_id": entry.entry_id,
+                    "title": entry.title,
+                    "domain": entry.domain,
+                    "state": (
+                        entry.state.value
+                        if hasattr(entry.state, "value")
+                        else str(entry.state)
+                    ),
+                    "options": dict(entry.options) if entry.options else {},
+                })
+
+        results.sort(
+            key=lambda x: (x["domain"], x.get("title", "").lower())
+        )
         return self.json(results)
 
     async def post(self, request: web.Request) -> web.Response:
-        """Handle POST request - create a template helper.
+        """Handle POST request - create a config entry helper.
 
         Request body:
             {
-                "template_type": "sensor",  (required)
-                "name": "My Sensor",  (required)
-                "state": "{{ states('sensor.x') }}",  (required)
-                "unit_of_measurement": "°C",  (optional)
-                "device_class": "temperature",  (optional, omit if not set)
-                "state_class": "measurement",  (optional, omit if not set)
-                "availability": "{{ true }}",  (optional)
+                "domain": "template",  (required)
+                "sub_type": "sensor",  (required for menu domains)
+                "config": {            (required)
+                    "name": "My Sensor",
+                    "state": "{{ states('sensor.x') }}",
+                    ...domain-specific fields...
+                }
             }
 
         Returns:
-            201: Template helper created
+            201: Helper created
             400: Invalid request
             401: Not authorized
             403: Permission denied
@@ -749,64 +772,39 @@ class TemplateHelperListView(HomeAssistantView):
                 ERR_INVALID_CONFIG,
             )
 
-        template_type = body.get("template_type")
-        name = body.get("name")
-        state = body.get("state")
+        domain = body.get("domain")
+        sub_type = body.get("sub_type")
+        config_data = body.get("config", {})
 
-        if not template_type:
+        if not domain:
             return self.json_message(
-                "Missing required field: template_type",
+                "Missing required field: domain",
                 HTTPStatus.BAD_REQUEST,
                 ERR_HELPER_INVALID_CONFIG,
             )
 
-        if not name:
+        if domain not in CONFIG_ENTRY_HELPER_DOMAINS:
             return self.json_message(
-                "Missing required field: name",
+                f"Invalid domain '{domain}'. Valid: "
+                f"{', '.join(CONFIG_ENTRY_HELPER_DOMAINS)}",
                 HTTPStatus.BAD_REQUEST,
-                ERR_HELPER_INVALID_CONFIG,
-            )
-
-        if not state:
-            return self.json_message(
-                "Missing required field: state",
-                HTTPStatus.BAD_REQUEST,
-                ERR_HELPER_INVALID_CONFIG,
+                ERR_HELPER_INVALID_DOMAIN,
             )
 
         try:
-            # Step 1: Initiate config entry flow
-            result = await hass.config_entries.flow.async_init(
-                "template", context={"source": "user"}
+            result = await _follow_config_flow(
+                hass, domain, config_data, sub_type
             )
-            flow_id = result["flow_id"]
-
-            # Step 2: Select template sub-type
-            result = await hass.config_entries.flow.async_configure(
-                flow_id, {"next_step_id": template_type}
-            )
-
-            # Step 3: Submit configuration
-            config_data: dict[str, Any] = {"name": name, "state": state}
-            for field in ("unit_of_measurement", "device_class", "state_class",
-                          "availability", "device_id"):
-                if field in body and body[field]:
-                    config_data[field] = body[field]
-
-            result = await hass.config_entries.flow.async_configure(
-                flow_id, config_data
-            )
-        except Exception as err:
-            _LOGGER.exception("Error creating template helper: %s", err)
+        except ValueError as err:
             return self.json_message(
-                f"Error creating template helper: {err}",
+                str(err),
                 HTTPStatus.BAD_REQUEST,
                 ERR_HELPER_INVALID_CONFIG,
             )
-
-        if result.get("type") != "create_entry":
+        except Exception as err:
+            _LOGGER.exception("Error creating config entry helper: %s", err)
             return self.json_message(
-                f"Unexpected flow result: {result.get('type')}",
+                f"Error creating helper: {err}",
                 HTTPStatus.INTERNAL_SERVER_ERROR,
             )
 
@@ -815,35 +813,37 @@ class TemplateHelperListView(HomeAssistantView):
             entry_result.entry_id
             if hasattr(entry_result, "entry_id")
             else entry_result.get("entry_id")
+            if isinstance(entry_result, dict)
+            else str(entry_result)
         )
 
         return self.json(
             {
                 "entry_id": entry_id,
-                "title": result.get("title", name),
-                "domain": "template",
-                "template_type": template_type,
+                "title": result.get("title", config_data.get("name", "")),
+                "domain": domain,
+                "sub_type": sub_type,
                 "options": result.get("options", config_data),
-                "message": "Template helper created",
+                "message": "Config entry helper created",
             },
             HTTPStatus.CREATED,
         )
 
 
-class TemplateHelperDetailView(HomeAssistantView):
-    """View for single template helper operations."""
+class ConfigEntryHelperDetailView(HomeAssistantView):
+    """View for single config-entry-flow helper operations."""
 
-    url = API_BASE_PATH_TEMPLATE_HELPERS + "/{entry_id}"
-    name = "api:config_mcp:template_helper"
+    url = API_BASE_PATH_CONFIG_ENTRY_HELPERS + "/{entry_id}"
+    name = "api:config_mcp:config_entry_helper"
     requires_auth = True
 
     async def get(
         self, request: web.Request, entry_id: str
     ) -> web.Response:
-        """Handle GET request - get a single template helper.
+        """Handle GET request - get a single config entry helper.
 
         Returns:
-            200: Template helper data with entities
+            200: Helper data with entities
             403: Permission denied
             404: Not found
         """
@@ -856,9 +856,9 @@ class TemplateHelperDetailView(HomeAssistantView):
             )
 
         entry = hass.config_entries.async_get_entry(entry_id)
-        if entry is None or entry.domain != "template":
+        if entry is None or entry.domain not in CONFIG_ENTRY_HELPER_DOMAINS:
             return self.json_message(
-                f"Template helper '{entry_id}' not found",
+                f"Config entry helper '{entry_id}' not found",
                 HTTPStatus.NOT_FOUND,
                 ERR_HELPER_NOT_FOUND,
             )
@@ -866,22 +866,29 @@ class TemplateHelperDetailView(HomeAssistantView):
         result: dict[str, Any] = {
             "entry_id": entry.entry_id,
             "title": entry.title,
-            "domain": "template",
-            "template_type": entry.options.get("template_type", ""),
-            "state": entry.state.value if hasattr(entry.state, "value") else str(entry.state),
+            "domain": entry.domain,
+            "state": (
+                entry.state.value
+                if hasattr(entry.state, "value")
+                else str(entry.state)
+            ),
             "supports_options": entry.supports_options,
-            "options": dict(entry.options),
+            "options": dict(entry.options) if entry.options else {},
         }
 
         # Include associated entities with current state
         entity_registry = er.async_get(hass)
-        entities = er.async_entries_for_config_entry(entity_registry, entry_id)
+        entities = er.async_entries_for_config_entry(
+            entity_registry, entry_id
+        )
         if entities:
             entity_entries = []
             for entity_entry in entities:
                 entity_data: dict[str, Any] = {
                     "entity_id": entity_entry.entity_id,
-                    "name": entity_entry.name or entity_entry.original_name,
+                    "name": (
+                        entity_entry.name or entity_entry.original_name
+                    ),
                     "area_id": entity_entry.area_id,
                     "disabled": entity_entry.disabled_by is not None,
                 }
@@ -899,10 +906,10 @@ class TemplateHelperDetailView(HomeAssistantView):
     async def patch(
         self, request: web.Request, entry_id: str
     ) -> web.Response:
-        """Handle PATCH request - update a template helper via options flow.
+        """Handle PATCH request - update a config entry helper via options flow.
 
         Returns:
-            200: Template helper updated
+            200: Helper updated
             400: Invalid request
             401: Not authorized
             403: Permission denied
@@ -924,9 +931,9 @@ class TemplateHelperDetailView(HomeAssistantView):
             )
 
         entry = hass.config_entries.async_get_entry(entry_id)
-        if entry is None or entry.domain != "template":
+        if entry is None or entry.domain not in CONFIG_ENTRY_HELPER_DOMAINS:
             return self.json_message(
-                f"Template helper '{entry_id}' not found",
+                f"Config entry helper '{entry_id}' not found",
                 HTTPStatus.NOT_FOUND,
                 ERR_HELPER_NOT_FOUND,
             )
@@ -947,28 +954,23 @@ class TemplateHelperDetailView(HomeAssistantView):
                 ERR_INVALID_CONFIG,
             )
 
+        # Remove empty string values that could cause enum validation errors
+        clean_updates = {
+            k: v for k, v in body.items() if v is not None and v != ""
+        }
+
         try:
-            result = await hass.config_entries.options.async_init(entry_id)
-            flow_id = result["flow_id"]
-
-            # Merge current options with updates
-            current_options = dict(entry.options)
-            update_data: dict[str, Any] = {}
-            for field in ("name", "state", "unit_of_measurement", "device_class",
-                          "state_class", "availability"):
-                if field in body:
-                    if body[field]:
-                        update_data[field] = body[field]
-                elif field in current_options:
-                    update_data[field] = current_options[field]
-
-            result = await hass.config_entries.options.async_configure(
-                flow_id, update_data
+            await _follow_options_flow(hass, entry_id, clean_updates)
+        except ValueError as err:
+            return self.json_message(
+                str(err),
+                HTTPStatus.BAD_REQUEST,
+                ERR_HELPER_INVALID_CONFIG,
             )
         except Exception as err:
-            _LOGGER.exception("Error updating template helper: %s", err)
+            _LOGGER.exception("Error updating config entry helper: %s", err)
             return self.json_message(
-                f"Error updating template helper: {err}",
+                f"Error updating helper: {err}",
                 HTTPStatus.BAD_REQUEST,
                 ERR_HELPER_INVALID_CONFIG,
             )
@@ -976,18 +978,18 @@ class TemplateHelperDetailView(HomeAssistantView):
         return self.json({
             "entry_id": entry_id,
             "title": entry.title,
-            "domain": "template",
-            "options": update_data,
-            "message": "Template helper updated",
+            "domain": entry.domain,
+            "updates": clean_updates,
+            "message": "Config entry helper updated",
         })
 
     async def delete(
         self, request: web.Request, entry_id: str
     ) -> web.Response:
-        """Handle DELETE request - delete a template helper.
+        """Handle DELETE request - delete a config entry helper.
 
         Returns:
-            204: Template helper deleted
+            204: Helper deleted
             401: Not authorized
             403: Permission denied
             404: Not found
@@ -1008,9 +1010,9 @@ class TemplateHelperDetailView(HomeAssistantView):
             )
 
         entry = hass.config_entries.async_get_entry(entry_id)
-        if entry is None or entry.domain != "template":
+        if entry is None or entry.domain not in CONFIG_ENTRY_HELPER_DOMAINS:
             return self.json_message(
-                f"Template helper '{entry_id}' not found",
+                f"Config entry helper '{entry_id}' not found",
                 HTTPStatus.NOT_FOUND,
                 ERR_HELPER_NOT_FOUND,
             )
@@ -1018,9 +1020,9 @@ class TemplateHelperDetailView(HomeAssistantView):
         try:
             await hass.config_entries.async_remove(entry_id)
         except Exception as err:
-            _LOGGER.exception("Error deleting template helper: %s", err)
+            _LOGGER.exception("Error deleting config entry helper: %s", err)
             return self.json_message(
-                f"Error deleting template helper: {err}",
+                f"Error deleting helper: {err}",
                 HTTPStatus.INTERNAL_SERVER_ERROR,
             )
 
