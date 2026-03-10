@@ -61,6 +61,10 @@ CONF_LABELS_CREATE = "labels_create"
 CONF_LABELS_UPDATE = "labels_update"
 CONF_LABELS_DELETE = "labels_delete"
 
+# Integrations (manage config entries)
+CONF_INTEGRATIONS_RELOAD = "integrations_reload"
+CONF_INTEGRATIONS_DISABLE = "integrations_disable"
+
 # Deprecated keys for migration from older versions
 CONF_DASHBOARDS_WRITE = "dashboards_write"
 CONF_AUTOMATIONS_WRITE = "automations_write"
@@ -105,15 +109,38 @@ DISCOVERY_RESOURCES = [
     RESOURCE_SERVICES,
 ]
 
-# Helper domains (input_* helpers and utility helpers)
+# Helper domains (StorageCollection-based helpers with WebSocket CRUD)
 HELPER_DOMAINS = [
     "input_boolean",
+    "input_button",
     "input_number",
     "input_text",
     "input_select",
     "input_datetime",
     "counter",
     "timer",
+    "schedule",
+]
+
+# Config Entry Flow helper domains (managed via Config Entry flows)
+CONFIG_ENTRY_HELPER_DOMAINS = [
+    "derivative",
+    "filter",
+    "generic_hygrostat",
+    "generic_thermostat",
+    "group",
+    "history_stats",
+    "integration",
+    "min_max",
+    "mold_indicator",
+    "random",
+    "statistics",
+    "switch_as_x",
+    "template",
+    "threshold",
+    "tod",
+    "trend",
+    "utility_meter",
 ]
 
 # MCP Server configuration key
@@ -172,6 +199,9 @@ DEFAULT_OPTIONS = {
     CONF_LABELS_CREATE: False,
     CONF_LABELS_UPDATE: False,
     CONF_LABELS_DELETE: False,
+    # Integrations - all disabled by default for safety
+    CONF_INTEGRATIONS_RELOAD: False,
+    CONF_INTEGRATIONS_DISABLE: False,
     # MCP Server - enabled by default
     CONF_MCP_SERVER: True,
     # MCP OAuth - disabled by default (requires hass-oidc-auth)
@@ -187,6 +217,7 @@ API_BASE_PATH_AUTOMATIONS = "/api/config_mcp/automations"
 API_BASE_PATH_SCENES = "/api/config_mcp/scenes"
 API_BASE_PATH_SCRIPTS = "/api/config_mcp/scripts"
 API_BASE_PATH_HELPERS = "/api/config_mcp/helpers"
+API_BASE_PATH_CONFIG_ENTRY_HELPERS = "/api/config_mcp/config_entry_helpers"
 
 # Discovery API paths (read-only)
 API_BASE_PATH_ENTITIES = "/api/config_mcp/entities"

@@ -1,8 +1,9 @@
 """MCP Tools for Home Assistant Helpers.
 
 Provides tools for managing Home Assistant helpers (input_boolean, input_number,
-input_text, input_select, input_datetime, counter, timer) via the Home Assistant
-Store API for direct storage file access.
+input_text, input_select, input_datetime, counter, timer) via Home Assistant's
+internal StorageCollection API, which keeps in-memory state and .storage files
+in sync (fixing BUG 3 — Store API cache bypass).
 
 Each tool registers itself using the @mcp_tool decorator.
 """
@@ -10,7 +11,6 @@ Each tool registers itself using the @mcp_tool decorator.
 from __future__ import annotations
 
 import logging
-import uuid
 from typing import Any
 
 from homeassistant.core import HomeAssistant
@@ -18,39 +18,54 @@ from homeassistant.helpers import entity_registry as er
 from homeassistant.helpers.storage import Store
 
 from ..mcp_registry import mcp_tool
-from ..const import HELPER_DOMAINS
+import voluptuous as vol
+
+from ..const import CONFIG_ENTRY_HELPER_DOMAINS, HELPER_DOMAINS
 
 _LOGGER = logging.getLogger(__name__)
 
-# Storage version must match Home Assistant's internal version for these domains
+# Storage version for reading helpers via Store API (list/get operations)
 STORAGE_VERSION = 1
+
+# Key used by HA's collection.store_entity_registry_items() to store
+# StorageCollection instances in hass.data
+COLLECTION_INSTANCES_KEY = "collection_instances"
 
 
 # Domain-specific required fields for creation
 HELPER_CREATE_FIELDS: dict[str, list[str]] = {
     "input_boolean": [],  # Only name required
+    "input_button": [],  # Only name required
     "input_number": ["min", "max"],  # min and max are required
     "input_text": [],  # Only name required
     "input_select": ["options"],  # options list is required
     "input_datetime": [],  # Only name required
     "counter": [],  # Only name required
     "timer": [],  # Only name required
+    "schedule": [],  # Only name required; schedule blocks added separately
 }
 
 # Domain-specific optional fields
 HELPER_OPTIONAL_FIELDS: dict[str, list[str]] = {
     "input_boolean": ["icon"],
+    "input_button": ["icon"],
     "input_number": ["icon", "mode", "step", "unit_of_measurement"],
     "input_text": ["icon", "min", "max", "pattern", "mode"],
     "input_select": ["icon"],
     "input_datetime": ["icon", "has_date", "has_time"],
     "counter": ["icon", "initial", "minimum", "maximum", "step", "restore"],
     "timer": ["icon", "duration", "restore"],
+    "schedule": ["icon", "monday", "tuesday", "wednesday", "thursday",
+                 "friday", "saturday", "sunday"],
 }
 
 
 async def _get_helpers_for_domain(hass: HomeAssistant, domain: str) -> list[dict[str, Any]]:
-    """Get all helpers for a specific domain using the Store API.
+    """Get all helpers for a specific domain.
+
+    Uses the StorageCollection's in-memory data when available (reflects
+    unsaved creates/updates/deletes immediately). Falls back to the Store
+    file if the collection isn't accessible.
 
     Args:
         hass: Home Assistant instance
@@ -61,8 +76,25 @@ async def _get_helpers_for_domain(hass: HomeAssistant, domain: str) -> list[dict
     """
     helpers = []
 
-    # Use Store API to read from .storage/core.{domain}
-    store: Store[dict[str, Any]] = Store(hass, STORAGE_VERSION, f"core.{domain}")
+    # Prefer the StorageCollection's in-memory data so changes are visible
+    # immediately without waiting for the 10-second save delay.
+    try:
+        storage_collection = _get_storage_collection(hass, domain)
+        for item in storage_collection.data.values():
+            if isinstance(item, dict):
+                helpers.append({
+                    "id": item.get("id"),
+                    "name": item.get("name"),
+                    "domain": domain,
+                    **{k: v for k, v in item.items() if k not in ("id", "name")},
+                })
+        return helpers
+    except (ValueError, AttributeError):
+        pass  # Fall through to Store-based read
+
+    # Fallback: read from .storage/{domain} on disk
+    # HA helper integrations use STORAGE_KEY = DOMAIN (no 'core.' prefix)
+    store: Store[dict[str, Any]] = Store(hass, STORAGE_VERSION, domain)
     data = await store.async_load()
 
     if data is None:
@@ -98,7 +130,7 @@ async def _get_helper_by_id(
     """
     for domain in HELPER_DOMAINS:
         try:
-            store: Store[dict[str, Any]] = Store(hass, STORAGE_VERSION, f"core.{domain}")
+            store: Store[dict[str, Any]] = Store(hass, STORAGE_VERSION, domain)
             data = await store.async_load()
 
             if data is None:
@@ -120,23 +152,59 @@ async def _get_helper_by_id(
     return None, None
 
 
-def _generate_helper_id(name: str) -> str:
-    """Generate a helper ID from the name.
+def _get_storage_collection(hass: HomeAssistant, domain: str) -> Any:
+    """Get Home Assistant's internal StorageCollection for a helper domain.
+
+    Retrieves the StorageCollection by looking up the registered WebSocket
+    handler for '{domain}/create', which is a bound method on the
+    StorageCollectionWebsocket instance that holds a reference to the collection.
 
     Args:
-        name: The helper name
+        hass: Home Assistant instance
+        domain: The helper domain (e.g., 'input_boolean')
 
     Returns:
-        A valid helper ID
+        The StorageCollection instance for the domain
+
+    Raises:
+        ValueError: If the collection is not found
     """
-    # Convert name to lowercase and replace spaces with underscores
-    helper_id = name.lower().replace(" ", "_")
-    # Remove any characters that aren't alphanumeric or underscores
-    helper_id = "".join(c for c in helper_id if c.isalnum() or c == "_")
-    # Ensure it doesn't start with a number
-    if helper_id and helper_id[0].isdigit():
-        helper_id = f"_{helper_id}"
-    return helper_id or f"helper_{uuid.uuid4().hex[:8]}"
+    # WS commands are stored in hass.data["websocket_api"][command_type]
+    ws_handlers = hass.data.get("websocket_api")
+    if ws_handlers is None:
+        raise ValueError(
+            f"WebSocket API not initialized. Cannot access {domain} collection."
+        )
+
+    # The handler for '{domain}/create' is a bound method on the
+    # StorageCollectionWebsocket instance which exposes .storage_collection
+    handler_info = ws_handlers.get(f"{domain}/create")
+    if handler_info is None:
+        raise ValueError(
+            f"No WebSocket handler for '{domain}/create'. "
+            f"Ensure the {domain} integration is loaded."
+        )
+
+    # handler_info may be the handler directly or a tuple (handler, schema)
+    handler = handler_info[0] if isinstance(handler_info, tuple) else handler_info
+
+    # Unwrap require_admin / async_response decorators to get the bound method
+    while hasattr(handler, "__wrapped__") or hasattr(handler, "func"):
+        handler = getattr(handler, "__wrapped__", None) or handler.func
+
+    ws_instance = getattr(handler, "__self__", None)
+    if ws_instance is None:
+        raise ValueError(
+            f"Could not extract StorageCollectionWebsocket instance for {domain}."
+        )
+
+    storage_collection = getattr(ws_instance, "storage_collection", None)
+    if storage_collection is None:
+        raise ValueError(
+            f"StorageCollectionWebsocket for {domain} has no storage_collection."
+        )
+
+    return storage_collection
 
 
 async def _create_helper(
@@ -144,7 +212,10 @@ async def _create_helper(
     domain: str,
     config: dict[str, Any],
 ) -> dict[str, Any]:
-    """Create a new helper using the Store API.
+    """Create a new helper using HA's internal StorageCollection.
+
+    Uses the same collection that WebSocket commands ({domain}/create) use,
+    keeping in-memory state and .storage files in sync.
 
     Args:
         hass: Home Assistant instance
@@ -160,43 +231,27 @@ async def _create_helper(
     if domain not in HELPER_DOMAINS:
         raise ValueError(f"Invalid helper domain: {domain}")
 
-    # Use Store API to read/write .storage/core.{domain}
-    store: Store[dict[str, Any]] = Store(hass, STORAGE_VERSION, f"core.{domain}")
-    data = await store.async_load() or {"items": []}
+    collection = _get_storage_collection(hass, domain)
 
-    # Generate ID from name if not provided
-    helper_id = config.get("id") or _generate_helper_id(config["name"])
+    # Remove 'id' if present — the collection generates IDs automatically
+    create_data = {k: v for k, v in config.items() if k != "id"}
 
-    # Check for duplicate ID
-    existing_ids = {item.get("id") for item in data.get("items", [])}
-    if helper_id in existing_ids:
-        raise ValueError(f"Helper with ID '{helper_id}' already exists")
-
-    # Build the helper configuration
-    new_helper = {
-        "id": helper_id,
-        **config,
-    }
-
-    # Add to items list
-    if "items" not in data:
-        data["items"] = []
-    data["items"].append(new_helper)
-
-    # Save to storage
-    await store.async_save(data)
-
-    # Reload the domain to pick up the new helper
     try:
-        await hass.services.async_call(domain, "reload", blocking=True)
-    except Exception as err:
-        _LOGGER.warning("Failed to reload %s after creation: %s", domain, err)
+        item = await collection.async_create_item(create_data)
+    except ValueError as err:
+        raise ValueError(f"Failed to create helper: {err}") from err
+
+    # The collection returns the created item (dict or object with as_dict())
+    if hasattr(item, "as_dict"):
+        item_data = item.as_dict()
+    elif isinstance(item, dict):
+        item_data = item
+    else:
+        item_data = {"id": str(item)}
 
     return {
-        "id": helper_id,
-        "name": config.get("name"),
         "domain": domain,
-        **{k: v for k, v in new_helper.items() if k not in ("id", "name")},
+        **item_data,
     }
 
 
@@ -206,7 +261,10 @@ async def _update_helper(
     helper_id: str,
     updates: dict[str, Any],
 ) -> dict[str, Any]:
-    """Update an existing helper using the Store API.
+    """Update an existing helper using HA's internal StorageCollection.
+
+    Uses the same collection that WebSocket commands ({domain}/update) use,
+    keeping in-memory state and .storage files in sync.
 
     Args:
         hass: Home Assistant instance
@@ -220,42 +278,28 @@ async def _update_helper(
     Raises:
         ValueError: If update fails
     """
-    # Use Store API to read/write .storage/core.{domain}
-    store: Store[dict[str, Any]] = Store(hass, STORAGE_VERSION, f"core.{domain}")
-    data = await store.async_load()
+    collection = _get_storage_collection(hass, domain)
 
-    if data is None:
-        raise ValueError(f"Helper domain {domain} has no stored data")
+    # Remove 'id' and 'domain' from updates — these can't be changed
+    update_data = {k: v for k, v in updates.items() if k not in ("id", "domain")}
 
-    items = data.get("items", [])
-
-    # Find and update the helper
-    updated_item = None
-    for i, item in enumerate(items):
-        if isinstance(item, dict) and item.get("id") == helper_id:
-            # Merge updates with existing item (don't change id)
-            items[i] = {**item, **updates, "id": helper_id}
-            updated_item = items[i]
-            break
-
-    if updated_item is None:
-        raise ValueError(f"Helper '{helper_id}' not found in {domain}")
-
-    # Save to storage
-    data["items"] = items
-    await store.async_save(data)
-
-    # Reload the domain to pick up the changes
     try:
-        await hass.services.async_call(domain, "reload", blocking=True)
-    except Exception as err:
-        _LOGGER.warning("Failed to reload %s after update: %s", domain, err)
+        item = await collection.async_update_item(helper_id, update_data)
+    except KeyError:
+        raise ValueError(f"Helper '{helper_id}' not found in {domain}")
+    except ValueError as err:
+        raise ValueError(f"Failed to update helper: {err}") from err
+
+    if hasattr(item, "as_dict"):
+        item_data = item.as_dict()
+    elif isinstance(item, dict):
+        item_data = item
+    else:
+        item_data = {"id": helper_id}
 
     return {
-        "id": updated_item.get("id"),
-        "name": updated_item.get("name"),
         "domain": domain,
-        **{k: v for k, v in updated_item.items() if k not in ("id", "name")},
+        **item_data,
     }
 
 
@@ -264,7 +308,10 @@ async def _delete_helper(
     domain: str,
     helper_id: str,
 ) -> None:
-    """Delete a helper using the Store API.
+    """Delete a helper using HA's internal StorageCollection.
+
+    Uses the same collection that WebSocket commands ({domain}/delete) use,
+    keeping in-memory state and .storage files in sync.
 
     Args:
         hass: Home Assistant instance
@@ -274,31 +321,12 @@ async def _delete_helper(
     Raises:
         ValueError: If deletion fails
     """
-    # Use Store API to read/write .storage/core.{domain}
-    store: Store[dict[str, Any]] = Store(hass, STORAGE_VERSION, f"core.{domain}")
-    data = await store.async_load()
+    collection = _get_storage_collection(hass, domain)
 
-    if data is None:
-        raise ValueError(f"Helper domain {domain} has no stored data")
-
-    items = data.get("items", [])
-
-    # Find and remove the helper
-    original_count = len(items)
-    items = [item for item in items if not (isinstance(item, dict) and item.get("id") == helper_id)]
-
-    if len(items) == original_count:
-        raise ValueError(f"Helper '{helper_id}' not found in {domain}")
-
-    # Save to storage
-    data["items"] = items
-    await store.async_save(data)
-
-    # Reload the domain to pick up the changes
     try:
-        await hass.services.async_call(domain, "reload", blocking=True)
-    except Exception as err:
-        _LOGGER.warning("Failed to reload %s after deletion: %s", domain, err)
+        await collection.async_delete_item(helper_id)
+    except KeyError:
+        raise ValueError(f"Helper '{helper_id}' not found in {domain}")
 
 
 def _format_helper(
@@ -353,6 +381,11 @@ def _format_helper(
     elif domain == "timer":
         data["duration"] = helper_config.get("duration")
         data["restore"] = helper_config.get("restore")
+    elif domain == "schedule":
+        for day in ("monday", "tuesday", "wednesday", "thursday",
+                    "friday", "saturday", "sunday"):
+            if day in helper_config:
+                data[day] = helper_config[day]
 
     # Add entity registry info if available
     if entity_entry:
@@ -520,12 +553,14 @@ async def get_helper(hass: HomeAssistant, arguments: dict[str, Any]) -> dict[str
         "Create a new helper entity. Requires specifying the helper domain and "
         "name. Additional fields depend on the domain:\n"
         "- input_boolean: icon\n"
+        "- input_button: icon\n"
         "- input_number: min (required), max (required), step, mode, unit_of_measurement, icon\n"
         "- input_text: min, max, pattern, mode, icon\n"
         "- input_select: options (required), icon\n"
         "- input_datetime: has_date, has_time, icon\n"
         "- counter: initial, minimum, maximum, step, restore, icon\n"
-        "- timer: duration, restore, icon"
+        "- timer: duration, restore, icon\n"
+        "- schedule: icon, monday..sunday (each an array of {from, to, data} blocks)"
     ),
     schema={
         "type": "object",
@@ -605,6 +640,42 @@ async def get_helper(hass: HomeAssistant, arguments: dict[str, Any]) -> dict[str
             "duration": {
                 "type": "string",
                 "description": "Default duration for timer (e.g., '00:01:00' for 1 minute)",
+            },
+            # schedule fields (each day is an array of time blocks)
+            "monday": {
+                "type": "array",
+                "items": {"type": "object"},
+                "description": "Monday schedule blocks: [{from: '08:00:00', to: '17:00:00'}]",
+            },
+            "tuesday": {
+                "type": "array",
+                "items": {"type": "object"},
+                "description": "Tuesday schedule blocks",
+            },
+            "wednesday": {
+                "type": "array",
+                "items": {"type": "object"},
+                "description": "Wednesday schedule blocks",
+            },
+            "thursday": {
+                "type": "array",
+                "items": {"type": "object"},
+                "description": "Thursday schedule blocks",
+            },
+            "friday": {
+                "type": "array",
+                "items": {"type": "object"},
+                "description": "Friday schedule blocks",
+            },
+            "saturday": {
+                "type": "array",
+                "items": {"type": "object"},
+                "description": "Saturday schedule blocks",
+            },
+            "sunday": {
+                "type": "array",
+                "items": {"type": "object"},
+                "description": "Sunday schedule blocks",
             },
         },
         "required": ["domain", "name"],
@@ -749,6 +820,42 @@ async def create_helper(hass: HomeAssistant, arguments: dict[str, Any]) -> dict[
                 "type": "string",
                 "description": "New default duration (timer)",
             },
+            # schedule fields
+            "monday": {
+                "type": "array",
+                "items": {"type": "object"},
+                "description": "New Monday schedule blocks",
+            },
+            "tuesday": {
+                "type": "array",
+                "items": {"type": "object"},
+                "description": "New Tuesday schedule blocks",
+            },
+            "wednesday": {
+                "type": "array",
+                "items": {"type": "object"},
+                "description": "New Wednesday schedule blocks",
+            },
+            "thursday": {
+                "type": "array",
+                "items": {"type": "object"},
+                "description": "New Thursday schedule blocks",
+            },
+            "friday": {
+                "type": "array",
+                "items": {"type": "object"},
+                "description": "New Friday schedule blocks",
+            },
+            "saturday": {
+                "type": "array",
+                "items": {"type": "object"},
+                "description": "New Saturday schedule blocks",
+            },
+            "sunday": {
+                "type": "array",
+                "items": {"type": "object"},
+                "description": "New Sunday schedule blocks",
+            },
         },
         "required": ["entity_id"],
     },
@@ -853,4 +960,581 @@ async def delete_helper(hass: HomeAssistant, arguments: dict[str, Any]) -> dict[
         "deleted": entity_id,
         "domain": domain,
         "message": f"{domain} helper deleted",
+    }
+
+
+# =============================================================================
+# Config Entry Helper Tools (Config Entry Flow API)
+# =============================================================================
+# These helpers use HA's Config Entry Flow for creation/management, unlike
+# StorageCollection helpers (input_boolean, counter, etc.). Includes template
+# sensors, groups, utility meters, derivatives, thermostats, and more.
+#
+# The flow follower dynamically inspects each flow step's voluptuous schema
+# and submits matching fields from the user's config dict, making it work
+# with any current or future config-entry-flow helper integration.
+
+# Domains that present a menu step requiring sub_type selection
+MENU_FLOW_DOMAINS = {"group", "template", "random"}
+
+
+def _extract_form_data(schema, config_data):
+    """Extract fields from config_data that match a voluptuous schema."""
+    if schema is None:
+        return {}
+
+    submit_data = {}
+    for key in schema.schema:
+        if isinstance(key, vol.Marker):
+            field_name = key.schema
+        else:
+            field_name = str(key)
+
+        if field_name in config_data:
+            submit_data[field_name] = config_data[field_name]
+
+    return submit_data
+
+
+async def _follow_config_flow(hass, domain, config_data, sub_type=None):
+    """Follow a config entry flow to create a helper, submitting matching fields.
+
+    Handles all flow patterns automatically:
+    - Direct form: init -> form -> create_entry
+    - Multi-step form: init -> form -> form -> ... -> create_entry
+    - Menu-first: init -> menu -> form -> create_entry
+    """
+    try:
+        result = await hass.config_entries.flow.async_init(
+            domain, context={"source": "user"}
+        )
+    except Exception as err:
+        raise ValueError(
+            f"Failed to initiate config flow for '{domain}': {err}. "
+            f"Ensure the '{domain}' integration is loaded."
+        ) from err
+
+    flow_id = result["flow_id"]
+
+    for _ in range(10):  # safety limit for multi-step flows
+        flow_type = result.get("type")
+
+        if flow_type == "create_entry":
+            return result
+
+        if flow_type == "abort":
+            raise ValueError(
+                f"Config flow aborted: {result.get('reason', 'unknown')}"
+            )
+
+        if flow_type == "menu":
+            if not sub_type:
+                menu_options = result.get("menu_options", [])
+                raise ValueError(
+                    f"Domain '{domain}' requires sub_type. "
+                    f"Available: {', '.join(menu_options)}"
+                )
+            result = await hass.config_entries.flow.async_configure(
+                flow_id, {"next_step_id": sub_type}
+            )
+            sub_type = None  # Only use for first menu
+            continue
+
+        if flow_type == "form":
+            schema = result.get("data_schema")
+            submit_data = _extract_form_data(schema, config_data)
+            try:
+                result = await hass.config_entries.flow.async_configure(
+                    flow_id, submit_data
+                )
+            except Exception as err:
+                step_id = result.get("step_id", "unknown")
+                raise ValueError(
+                    f"Failed at flow step '{step_id}': {err}"
+                ) from err
+            continue
+
+        raise ValueError(f"Unexpected flow step type: {flow_type}")
+
+    raise ValueError("Config flow did not complete within expected steps")
+
+
+async def _follow_options_flow(hass, entry_id, update_data):
+    """Follow an options flow, merging current options with updates."""
+    entry = hass.config_entries.async_get_entry(entry_id)
+    if entry is None:
+        raise ValueError(f"Config entry '{entry_id}' not found")
+
+    merged = {**dict(entry.options), **update_data}
+
+    try:
+        result = await hass.config_entries.options.async_init(entry_id)
+    except Exception as err:
+        raise ValueError(
+            f"Failed to start options flow for '{entry.title}': {err}"
+        ) from err
+
+    flow_id = result["flow_id"]
+
+    for _ in range(10):
+        flow_type = result.get("type")
+
+        if flow_type == "create_entry":
+            return result
+
+        if flow_type == "abort":
+            raise ValueError(
+                f"Options flow aborted: {result.get('reason', 'unknown')}"
+            )
+
+        if flow_type == "form":
+            schema = result.get("data_schema")
+            submit_data = _extract_form_data(schema, merged)
+            try:
+                result = await hass.config_entries.options.async_configure(
+                    flow_id, submit_data
+                )
+            except Exception as err:
+                step_id = result.get("step_id", "unknown")
+                raise ValueError(
+                    f"Failed at options step '{step_id}': {err}"
+                ) from err
+            continue
+
+        raise ValueError(f"Unexpected options flow type: {flow_type}")
+
+    raise ValueError("Options flow did not complete within expected steps")
+
+
+# =============================================================================
+# List Config Entry Helpers
+# =============================================================================
+
+@mcp_tool(
+    name="ha_list_config_entry_helpers",
+    description=(
+        "List config-entry-flow-based helpers (template sensors, groups, utility "
+        "meters, derivatives, thermostats, etc.). These are distinct from "
+        "StorageCollection helpers (input_boolean, counter, timer, etc.).\n\n"
+        "Optionally filter by domain and/or sub_type. Returns entry_id, title, "
+        "domain, state, and configuration for each helper."
+    ),
+    schema={
+        "type": "object",
+        "properties": {
+            "domain": {
+                "type": "string",
+                "description": (
+                    "Filter by integration domain. If omitted, lists helpers "
+                    "from all config-entry-flow domains."
+                ),
+                "enum": CONFIG_ENTRY_HELPER_DOMAINS,
+            },
+            "sub_type": {
+                "type": "string",
+                "description": (
+                    "Filter by sub-type within a domain (e.g., 'sensor' for "
+                    "template sensors, 'light' for light groups)"
+                ),
+            },
+        },
+    },
+    permission="helpers_read",
+)
+async def list_config_entry_helpers(
+    hass: HomeAssistant, arguments: dict[str, Any]
+) -> list[dict[str, Any]]:
+    """List all config-entry-flow-based helpers."""
+    domain_filter = arguments.get("domain")
+    sub_type_filter = arguments.get("sub_type")
+
+    domains = [domain_filter] if domain_filter else CONFIG_ENTRY_HELPER_DOMAINS
+
+    results = []
+    for domain in domains:
+        try:
+            entries = hass.config_entries.async_entries(domain)
+        except Exception:
+            continue
+
+        for entry in entries:
+            if sub_type_filter:
+                entry_options = entry.options or {}
+                entry_sub_type = (
+                    entry_options.get("template_type")
+                    or entry_options.get("group_type")
+                    or entry_options.get("type")
+                    or ""
+                )
+                if entry_sub_type != sub_type_filter:
+                    continue
+
+            results.append({
+                "entry_id": entry.entry_id,
+                "title": entry.title,
+                "domain": entry.domain,
+                "state": (
+                    entry.state.value
+                    if hasattr(entry.state, "value")
+                    else str(entry.state)
+                ),
+                "options": dict(entry.options) if entry.options else {},
+            })
+
+    results.sort(key=lambda x: (x["domain"], x.get("title", "").lower()))
+    return results
+
+
+# =============================================================================
+# Get Config Entry Helper
+# =============================================================================
+
+@mcp_tool(
+    name="ha_get_config_entry_helper",
+    description=(
+        "Get full details for a specific config-entry-flow helper by its config "
+        "entry ID. Returns configuration, options, associated entities, and "
+        "current state."
+    ),
+    schema={
+        "type": "object",
+        "properties": {
+            "entry_id": {
+                "type": "string",
+                "description": (
+                    "The config entry ID. Get this from "
+                    "ha_list_config_entry_helpers."
+                ),
+            },
+        },
+        "required": ["entry_id"],
+    },
+    permission="helpers_read",
+)
+async def get_config_entry_helper(
+    hass: HomeAssistant, arguments: dict[str, Any]
+) -> dict[str, Any]:
+    """Get a specific config-entry-flow helper."""
+    entry_id = arguments["entry_id"]
+
+    entry = hass.config_entries.async_get_entry(entry_id)
+    if entry is None:
+        raise ValueError(f"Config entry '{entry_id}' not found")
+
+    if entry.domain not in CONFIG_ENTRY_HELPER_DOMAINS:
+        raise ValueError(
+            f"Config entry '{entry_id}' is not a config-entry helper "
+            f"(domain: {entry.domain})"
+        )
+
+    result: dict[str, Any] = {
+        "entry_id": entry.entry_id,
+        "title": entry.title,
+        "domain": entry.domain,
+        "state": (
+            entry.state.value
+            if hasattr(entry.state, "value")
+            else str(entry.state)
+        ),
+        "supports_options": entry.supports_options,
+        "supports_unload": entry.supports_unload,
+        "options": dict(entry.options) if entry.options else {},
+    }
+
+    # Find associated entities
+    entity_registry = er.async_get(hass)
+    entities = er.async_entries_for_config_entry(entity_registry, entry_id)
+    if entities:
+        entity_entries = []
+        for entity_entry in entities:
+            entity_data: dict[str, Any] = {
+                "entity_id": entity_entry.entity_id,
+                "name": entity_entry.name or entity_entry.original_name,
+                "area_id": entity_entry.area_id,
+                "disabled": entity_entry.disabled_by is not None,
+                "labels": (
+                    list(entity_entry.labels) if entity_entry.labels else []
+                ),
+            }
+            state = hass.states.get(entity_entry.entity_id)
+            if state:
+                entity_data["current_state"] = {
+                    "state": state.state,
+                    "attributes": dict(state.attributes),
+                    "last_changed": (
+                        state.last_changed.isoformat()
+                        if state.last_changed
+                        else None
+                    ),
+                }
+            entity_entries.append(entity_data)
+        result["entities"] = entity_entries
+
+    return result
+
+
+# =============================================================================
+# Create Config Entry Helper
+# =============================================================================
+
+_CREATE_DESCRIPTION = (
+    "Create a config-entry-flow helper. The flow is followed automatically - "
+    "just provide domain, config fields, and sub_type if needed.\n\n"
+    "For menu-based domains (group, template, random), sub_type is required.\n\n"
+    "DOMAIN REFERENCE (* = required):\n\n"
+    "DIRECT FORM DOMAINS:\n"
+    "- derivative: name*, source* (entity_id), round_digits, "
+    "time_window (dict {hours/minutes/seconds}), unit_prefix (n|u|m|k|M|G|T|P), "
+    "unit_time (s|min|h|d)\n"
+    "- generic_hygrostat: name*, device_class* (humidifier|dehumidifier), "
+    "sensor* (humidity entity_id), humidifier* (switch/fan entity_id), "
+    "dry_tolerance*, wet_tolerance*\n"
+    "- integration: name*, source_sensor* (entity_id), "
+    "method (trapezoidal|left|right), round_digits, unit_prefix (k|M|G|T), "
+    "unit_time (s|min|h|d)\n"
+    "- min_max: name*, entity_ids* (list of entity_ids), "
+    "type* (min|max|mean|median|last|range|sum), round_digits\n"
+    "- mold_indicator: name*, indoor_temp* (entity_id), "
+    "indoor_humidity* (entity_id), outdoor_temp* (entity_id), "
+    "calibration_factor*\n"
+    "- switch_as_x: entity_id* (switch entity), "
+    "target_domain* (cover|fan|light|lock|siren|valve), invert\n"
+    "- threshold: name*, entity_id* (sensor), lower and/or upper "
+    "(at least one required), hysteresis\n"
+    "- tod: name*, after_time* (HH:MM:SS), before_time* (HH:MM:SS)\n"
+    "- utility_meter: name*, source_sensor* (entity_id), "
+    "meter_type* (none|quarter-hourly|hourly|daily|weekly|monthly|"
+    "bimonthly|quarterly|yearly), tariffs (list), net_consumption, "
+    "delta_values, periodically_resetting\n\n"
+    "MULTI-STEP FORM DOMAINS:\n"
+    "- filter: name*, entity_id*, filter_name* (lowpass|outlier|range|"
+    "throttle|time_sma|time_throttle), filter_window_size, filter_radius, "
+    "filter_precision\n"
+    "- generic_thermostat: name*, ac_mode* (bool), sensor* (temp entity_id), "
+    "heater* (switch/fan entity_id), cold_tolerance*, hot_tolerance*, "
+    "min_temp, max_temp\n"
+    "- history_stats: name*, entity_id*, type* (time|ratio|count), "
+    "state* (list of state strings)\n"
+    "- statistics: name*, entity_id*, state_characteristic* "
+    "(average_linear|count|mean|median|standard_deviation|sum|value_max|"
+    "value_min|variance|etc.)\n"
+    "- trend: name*, entity_id* (sensor), attribute, invert, max_samples, "
+    "min_samples, min_gradient, sample_duration\n\n"
+    "MENU DOMAINS (sub_type required):\n"
+    "- group: sub_type* (binary_sensor|cover|fan|light|lock|media_player|"
+    "sensor|switch|etc.), name*, entities* (list), hide_members, "
+    "all (bool, for binary_sensor/light/switch), "
+    "type (sensor: min|max|mean|median|sum)\n"
+    "- random: sub_type* (binary_sensor|sensor), name*, minimum, maximum, "
+    "device_class\n"
+    "- template: sub_type* (sensor|binary_sensor|switch|number|select|"
+    "button|cover|fan|light|lock|etc.), name*, state* (Jinja2), "
+    "unit_of_measurement, device_class, state_class, availability"
+)
+
+
+@mcp_tool(
+    name="ha_create_config_entry_helper",
+    description=_CREATE_DESCRIPTION,
+    schema={
+        "type": "object",
+        "properties": {
+            "domain": {
+                "type": "string",
+                "description": "The helper integration domain",
+                "enum": CONFIG_ENTRY_HELPER_DOMAINS,
+            },
+            "sub_type": {
+                "type": "string",
+                "description": (
+                    "Sub-type for menu domains. Required for group "
+                    "(binary_sensor, cover, fan, light, lock, media_player, "
+                    "sensor, switch), template (sensor, binary_sensor, switch, "
+                    "number, etc.), and random (binary_sensor, sensor)."
+                ),
+            },
+            "config": {
+                "type": "object",
+                "description": (
+                    "Configuration fields as key-value pairs. Required and "
+                    "optional fields depend on the domain - see tool description."
+                ),
+            },
+        },
+        "required": ["domain", "config"],
+    },
+    permission="helpers_create",
+)
+async def create_config_entry_helper(
+    hass: HomeAssistant, arguments: dict[str, Any]
+) -> dict[str, Any]:
+    """Create a config-entry-flow helper."""
+    domain = arguments["domain"]
+    sub_type = arguments.get("sub_type")
+    config_data = arguments.get("config", {})
+
+    if domain not in CONFIG_ENTRY_HELPER_DOMAINS:
+        raise ValueError(
+            f"Invalid domain '{domain}'. Valid domains: "
+            f"{', '.join(CONFIG_ENTRY_HELPER_DOMAINS)}"
+        )
+
+    if domain in MENU_FLOW_DOMAINS and not sub_type:
+        raise ValueError(
+            f"Domain '{domain}' requires sub_type parameter"
+        )
+
+    result = await _follow_config_flow(hass, domain, config_data, sub_type)
+
+    entry_result = result.get("result", {})
+    entry_id = (
+        entry_result.entry_id
+        if hasattr(entry_result, "entry_id")
+        else entry_result.get("entry_id") if isinstance(entry_result, dict)
+        else str(entry_result)
+    )
+
+    return {
+        "entry_id": entry_id,
+        "title": result.get("title", config_data.get("name", "")),
+        "domain": domain,
+        "sub_type": sub_type,
+        "options": result.get("options", config_data),
+        "message": f"{domain} helper created",
+    }
+
+
+# =============================================================================
+# Update Config Entry Helper
+# =============================================================================
+
+@mcp_tool(
+    name="ha_update_config_entry_helper",
+    description=(
+        "Update a config-entry-flow helper via its Options Flow. Provide the "
+        "entry_id and the fields to update. Current options are merged with "
+        "updates automatically.\n\n"
+        "Use ha_list_config_entry_helpers to find entry IDs and current options.\n\n"
+        "IMPORTANT: Optional enum fields (device_class, state_class) must be "
+        "omitted entirely if not needed - empty strings may cause validation errors."
+    ),
+    schema={
+        "type": "object",
+        "properties": {
+            "entry_id": {
+                "type": "string",
+                "description": (
+                    "The config entry ID to update. Get this from "
+                    "ha_list_config_entry_helpers."
+                ),
+            },
+            "updates": {
+                "type": "object",
+                "description": (
+                    "Fields to update as key-value pairs. Only provided fields "
+                    "are changed; existing options are preserved."
+                ),
+            },
+        },
+        "required": ["entry_id", "updates"],
+    },
+    permission="helpers_update",
+)
+async def update_config_entry_helper(
+    hass: HomeAssistant, arguments: dict[str, Any]
+) -> dict[str, Any]:
+    """Update a config-entry-flow helper via Options Flow."""
+    entry_id = arguments["entry_id"]
+    updates = arguments.get("updates", {})
+
+    entry = hass.config_entries.async_get_entry(entry_id)
+    if entry is None:
+        raise ValueError(f"Config entry '{entry_id}' not found")
+
+    if entry.domain not in CONFIG_ENTRY_HELPER_DOMAINS:
+        raise ValueError(
+            f"Config entry '{entry_id}' is not a config-entry helper "
+            f"(domain: {entry.domain})"
+        )
+
+    if not entry.supports_options:
+        raise ValueError(
+            f"Helper '{entry.title}' ({entry.domain}) does not support "
+            f"options updates"
+        )
+
+    if not updates:
+        raise ValueError("No update fields provided")
+
+    # Remove empty string values that could cause enum validation errors
+    clean_updates = {
+        k: v for k, v in updates.items() if v is not None and v != ""
+    }
+
+    await _follow_options_flow(hass, entry_id, clean_updates)
+
+    return {
+        "entry_id": entry_id,
+        "title": entry.title,
+        "domain": entry.domain,
+        "updates": clean_updates,
+        "message": f"{entry.domain} helper '{entry.title}' updated",
+    }
+
+
+# =============================================================================
+# Delete Config Entry Helper
+# =============================================================================
+
+@mcp_tool(
+    name="ha_delete_config_entry_helper",
+    description=(
+        "Delete a config-entry-flow helper by its config entry ID. This action "
+        "cannot be undone. Use ha_list_config_entry_helpers to find entry IDs."
+    ),
+    schema={
+        "type": "object",
+        "properties": {
+            "entry_id": {
+                "type": "string",
+                "description": (
+                    "The config entry ID to delete. Get this from "
+                    "ha_list_config_entry_helpers."
+                ),
+            },
+        },
+        "required": ["entry_id"],
+    },
+    permission="helpers_delete",
+)
+async def delete_config_entry_helper(
+    hass: HomeAssistant, arguments: dict[str, Any]
+) -> dict[str, Any]:
+    """Delete a config-entry-flow helper."""
+    entry_id = arguments["entry_id"]
+
+    entry = hass.config_entries.async_get_entry(entry_id)
+    if entry is None:
+        raise ValueError(f"Config entry '{entry_id}' not found")
+
+    if entry.domain not in CONFIG_ENTRY_HELPER_DOMAINS:
+        raise ValueError(
+            f"Config entry '{entry_id}' is not a config-entry helper "
+            f"(domain: {entry.domain})"
+        )
+
+    title = entry.title
+    domain = entry.domain
+
+    try:
+        result = await hass.config_entries.async_remove(entry_id)
+    except Exception as err:
+        raise ValueError(f"Failed to delete helper: {err}") from err
+
+    return {
+        "deleted": entry_id,
+        "title": title,
+        "domain": domain,
+        "require_restart": result.get("require_restart", False),
+        "message": f"{domain} helper '{title}' deleted",
     }

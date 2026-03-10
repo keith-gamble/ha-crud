@@ -8,6 +8,7 @@ from __future__ import annotations
 import logging
 from typing import Any
 
+from homeassistant.config_entries import ConfigEntryDisabler
 from homeassistant.core import HomeAssistant
 from homeassistant.helpers import (
     device_registry as dr,
@@ -114,8 +115,96 @@ async def get_integration(hass: HomeAssistant, arguments: dict[str, Any]) -> dic
     return {
         "domain": domain,
         "name": entries[0].title or domain,
-        "config_entries": len(entries),
+        "config_entries": [
+            {
+                "entry_id": e.entry_id,
+                "title": e.title,
+                "state": e.state.value,
+                "disabled_by": e.disabled_by.value if e.disabled_by else None,
+            }
+            for e in entries
+        ],
         "devices": devices,
         "entity_breakdown": entity_domains,
         "total_entities": sum(entity_domains.values()),
+    }
+
+
+@mcp_tool(
+    name="ha_reload_integration",
+    description=(
+        "Reload a specific integration config entry. This restarts the integration "
+        "without restarting Home Assistant. Useful after configuration changes. "
+        "Use ha_get_integration to find the entry_id."
+    ),
+    schema={
+        "type": "object",
+        "properties": {
+            "entry_id": {
+                "type": "string",
+                "description": "The config entry ID to reload (from ha_get_integration)",
+            }
+        },
+        "required": ["entry_id"],
+    },
+    permission="integrations_reload",
+)
+async def reload_integration(hass: HomeAssistant, arguments: dict[str, Any]) -> dict[str, Any]:
+    """Reload a config entry."""
+    entry_id = arguments["entry_id"]
+
+    entry = hass.config_entries.async_get_entry(entry_id)
+    if entry is None:
+        raise ValueError(f"Config entry '{entry_id}' not found")
+
+    await hass.config_entries.async_reload(entry_id)
+
+    return {
+        "entry_id": entry_id,
+        "domain": entry.domain,
+        "title": entry.title,
+        "reloaded": True,
+    }
+
+
+@mcp_tool(
+    name="ha_set_integration_disabled",
+    description=(
+        "Enable or disable a specific integration config entry. "
+        "Disabled integrations are not loaded on startup and their entities become unavailable. "
+        "Use ha_get_integration to find the entry_id."
+    ),
+    schema={
+        "type": "object",
+        "properties": {
+            "entry_id": {
+                "type": "string",
+                "description": "The config entry ID to enable or disable (from ha_get_integration)",
+            },
+            "disabled": {
+                "type": "boolean",
+                "description": "True to disable the integration, False to enable it",
+            },
+        },
+        "required": ["entry_id", "disabled"],
+    },
+    permission="integrations_disable",
+)
+async def set_integration_disabled(hass: HomeAssistant, arguments: dict[str, Any]) -> dict[str, Any]:
+    """Enable or disable a config entry."""
+    entry_id = arguments["entry_id"]
+    disabled = arguments["disabled"]
+
+    entry = hass.config_entries.async_get_entry(entry_id)
+    if entry is None:
+        raise ValueError(f"Config entry '{entry_id}' not found")
+
+    disabled_by = ConfigEntryDisabler.USER if disabled else None
+    hass.config_entries.async_update_entry(entry, disabled_by=disabled_by)
+
+    return {
+        "entry_id": entry_id,
+        "domain": entry.domain,
+        "title": entry.title,
+        "disabled": disabled,
     }

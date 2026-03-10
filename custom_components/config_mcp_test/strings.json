@@ -28,7 +28,9 @@
           "automations": "Automations",
           "scripts": "Scripts",
           "scenes": "Scenes",
-          "categories": "Categories & Labels"
+          "helpers": "Helpers",
+          "categories": "Categories & Labels",
+          "integrations": "Integration Management"
         }
       },
       "discovery": {
@@ -129,6 +131,22 @@
           "scenes_delete": "Delete scenes"
         }
       },
+      "helpers": {
+        "title": "Helpers",
+        "description": "Configure helper management for input_* helpers (input_boolean, input_number, input_text, input_select, input_datetime, counter, timer) and template-based helpers (template sensors, binary sensors, switches, etc.).\n\n**MCP Tools:** `ha_list_helpers`, `ha_create_helper`, `ha_update_helper`, `ha_delete_helper`, `ha_list_template_helpers`, `ha_create_template_helper`, `ha_update_template_helper`, `ha_delete_template_helper`\n**REST Endpoint:** `/api/config_mcp/helpers`",
+        "data": {
+          "helpers_read": "Read",
+          "helpers_create": "Create",
+          "helpers_update": "Update",
+          "helpers_delete": "Delete"
+        },
+        "data_description": {
+          "helpers_read": "List and get input_* helpers and template-based helpers",
+          "helpers_create": "Create new input_* helpers and template helpers (sensors, binary sensors, switches, etc.)",
+          "helpers_update": "Update helper configuration and settings",
+          "helpers_delete": "Delete helpers permanently"
+        }
+      },
       "categories": {
         "title": "Categories & Labels",
         "description": "Configure category and label management for organizing automations, scripts, and other resources.\n\n**Endpoints:**\n- `/api/config_mcp/categories/{scope}`\n- `/api/config_mcp/labels`",
@@ -151,6 +169,18 @@
           "labels_create": "Create new labels for tagging resources",
           "labels_update": "Update label names, icons, colors, and descriptions",
           "labels_delete": "Delete labels (items will have label removed)"
+        }
+      },
+      "integrations": {
+        "title": "Integration Management",
+        "description": "Configure permissions for managing integration config entries.",
+        "data": {
+          "integrations_reload": "Reload",
+          "integrations_disable": "Enable / Disable"
+        },
+        "data_description": {
+          "integrations_reload": "Reload an integration config entry without restarting Home Assistant",
+          "integrations_disable": "Enable or disable integration config entries"
         }
       }
     }
