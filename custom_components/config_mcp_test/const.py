@@ -61,6 +61,10 @@ CONF_LABELS_CREATE = "labels_create"
 CONF_LABELS_UPDATE = "labels_update"
 CONF_LABELS_DELETE = "labels_delete"
 
+# Integrations (manage config entries)
+CONF_INTEGRATIONS_RELOAD = "integrations_reload"
+CONF_INTEGRATIONS_DISABLE = "integrations_disable"
+
 # Deprecated keys for migration from older versions
 CONF_DASHBOARDS_WRITE = "dashboards_write"
 CONF_AUTOMATIONS_WRITE = "automations_write"
@@ -195,6 +199,9 @@ DEFAULT_OPTIONS = {
     CONF_LABELS_CREATE: False,
     CONF_LABELS_UPDATE: False,
     CONF_LABELS_DELETE: False,
+    # Integrations - all disabled by default for safety
+    CONF_INTEGRATIONS_RELOAD: False,
+    CONF_INTEGRATIONS_DISABLE: False,
     # MCP Server - enabled by default
     CONF_MCP_SERVER: True,
     # MCP OAuth - disabled by default (requires hass-oidc-auth)

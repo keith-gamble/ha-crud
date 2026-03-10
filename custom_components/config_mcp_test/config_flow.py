@@ -36,6 +36,8 @@ from .const import (
     CONF_HELPERS_DELETE,
     CONF_HELPERS_READ,
     CONF_HELPERS_UPDATE,
+    CONF_INTEGRATIONS_DISABLE,
+    CONF_INTEGRATIONS_RELOAD,
     CONF_LABELS_CREATE,
     CONF_LABELS_DELETE,
     CONF_LABELS_READ,
@@ -171,6 +173,7 @@ class HaCrudOptionsFlow(OptionsFlow):
                 "scenes",
                 "helpers",
                 "categories",
+                "integrations",
             ],
         )
 
@@ -512,6 +515,33 @@ class HaCrudOptionsFlow(OptionsFlow):
                     vol.Required(
                         CONF_HELPERS_DELETE,
                         default=self._options.get(CONF_HELPERS_DELETE, False),
+                    ): bool,
+                }
+            ),
+        )
+
+    async def async_step_integrations(
+        self, user_input: dict[str, Any] | None = None
+    ) -> FlowResult:
+        """Configure integration management permissions."""
+        if not self._options:
+            self._options = _migrate_legacy_options(dict(self.config_entry.options))
+
+        if user_input is not None:
+            self._options.update(user_input)
+            return self.async_create_entry(title="", data=self._options)
+
+        return self.async_show_form(
+            step_id="integrations",
+            data_schema=vol.Schema(
+                {
+                    vol.Required(
+                        CONF_INTEGRATIONS_RELOAD,
+                        default=self._options.get(CONF_INTEGRATIONS_RELOAD, False),
+                    ): bool,
+                    vol.Required(
+                        CONF_INTEGRATIONS_DISABLE,
+                        default=self._options.get(CONF_INTEGRATIONS_DISABLE, False),
                     ): bool,
                 }
             ),

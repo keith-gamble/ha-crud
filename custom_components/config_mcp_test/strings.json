@@ -29,7 +29,8 @@
           "scripts": "Scripts",
           "scenes": "Scenes",
           "helpers": "Helpers",
-          "categories": "Categories & Labels"
+          "categories": "Categories & Labels",
+          "integrations": "Integration Management"
         }
       },
       "discovery": {
@@ -168,6 +169,18 @@
           "labels_create": "Create new labels for tagging resources",
           "labels_update": "Update label names, icons, colors, and descriptions",
           "labels_delete": "Delete labels (items will have label removed)"
+        }
+      },
+      "integrations": {
+        "title": "Integration Management",
+        "description": "Configure permissions for managing integration config entries.",
+        "data": {
+          "integrations_reload": "Reload",
+          "integrations_disable": "Enable / Disable"
+        },
+        "data_description": {
+          "integrations_reload": "Reload an integration config entry without restarting Home Assistant",
+          "integrations_disable": "Enable or disable integration config entries"
         }
       }
     }
